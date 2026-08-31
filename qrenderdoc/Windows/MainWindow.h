@@ -117,6 +117,7 @@ public:
   void showTextureViewer() { on_action_Texture_Viewer_triggered(); }
   void showPipelineViewer() { on_action_Pipeline_State_triggered(); }
   void showCaptureDialog() { on_action_Launch_Application_triggered(); }
+  void showKernelCaptureDialog() { on_action_Inject_Kernel_triggered(); }
   void showDebugMessageView() { on_action_Errors_and_Warnings_triggered(); }
   void showDiagnosticLogView();
   void showCommentView() { on_action_Comments_triggered(); }
@@ -252,6 +253,8 @@ private:
   void FillRemotesMenu(QMenu *menu, bool includeLocalhost);
 
   void showLaunchError(ResultDetails result);
+
+  bool RestartAsAdminForKernelCapture();
 
   bool isUnshareableDeviceInUse();
 };

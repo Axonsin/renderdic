@@ -34,6 +34,7 @@
 #include <winternl.h>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QDateTime>
 #include <QCryptographicHash>
 #include <QDebug>
@@ -154,7 +155,10 @@ bool DriverLoader::CreateServiceRegistryKey(const QString &serviceName, const QS
 
   bool ok = true;
 
-  std::wstring imageValue = kDosDevicePrefix + imagePath.toStdWString();
+  // QDir paths use '/' internally, which QFile accepts but the kernel object manager does not
+  // accept in an NT path. Always write a fully native path to the service ImagePath value.
+  const QString nativeImagePath = QDir::toNativeSeparators(QDir::cleanPath(imagePath));
+  std::wstring imageValue = kDosDevicePrefix + nativeImagePath.toStdWString();
   status = RegSetValueExW(key, L"ImagePath", 0, REG_EXPAND_SZ, (const BYTE *)imageValue.c_str(),
                           (DWORD)((imageValue.size() + 1) * sizeof(wchar_t)));
   ok = ok && status == ERROR_SUCCESS;
@@ -230,8 +234,8 @@ bool DriverLoader::Load(BackendId backend, LoadedDriver *out, QString *errorDeta
   LoadedDriver driver;
   driver.serviceName = RandomServiceName();
 
-  QString tempDir = QDir::tempPath();
-  driver.tempPath = tempDir + QLatin1Char('\\') + driver.serviceName;
+  driver.tempPath = QDir::toNativeSeparators(
+      QDir::cleanPath(QDir(QDir::tempPath()).filePath(driver.serviceName)));
 
   size_t driverSize = 0;
   const unsigned char *driverBytes = DriverBytesFor(backend, &driverSize);
@@ -240,6 +244,15 @@ bool DriverLoader::Load(BackendId backend, LoadedDriver *out, QString *errorDeta
   if(!WriteTempFile(driver.tempPath, driverBytes, driverSize))
   {
     *errorDetail = QStringLiteral("Failed to write driver file to %1").arg(driver.tempPath);
+    return false;
+  }
+
+  const QFileInfo writtenDriver(driver.tempPath);
+  if(!writtenDriver.exists() || writtenDriver.size() != (qint64)driverSize)
+  {
+    *errorDetail = QStringLiteral("The temporary driver image is missing or incomplete: %1")
+                       .arg(driver.tempPath);
+    QFile::remove(driver.tempPath);
     return false;
   }
 
@@ -285,6 +298,11 @@ bool DriverLoader::Load(BackendId backend, LoadedDriver *out, QString *errorDeta
       *errorDetail = QStringLiteral("Access denied or insufficient resources (0x%1) - "
                                     "an anti-cheat or antivirus may be blocking the load.")
                          .arg((quint32)loadStatus, 8, 16, QLatin1Char('0'));
+    }
+    else if(loadStatus == (NTSTATUS)0xC000003AL)
+    {
+      *errorDetail = QStringLiteral("The temporary driver image path was not found: %1")
+                         .arg(driver.tempPath);
     }
     else
     {

@@ -365,6 +365,10 @@ int main(int argc, char *argv[])
   hideOption(crashReport);
   parser.addOption(crashReport);
 
+  QCommandLineOption kernelCapture(lit("kernel-capture"), QString());
+  hideOption(kernelCapture);
+  parser.addOption(kernelCapture);
+
   parser.addPositionalArgument(lit("filename"), tr("The file to open."));
 
   bool parsedCommands = parser.parse(application.arguments());
@@ -398,6 +402,7 @@ int main(int argc, char *argv[])
   }
 
   bool temp = parser.isSet(tempfile);
+  bool kernelCaptureRequested = parser.isSet(kernelCapture);
 
   QString remoteHost;
   uint remoteIdent = 0;
@@ -494,6 +499,32 @@ int main(int argc, char *argv[])
               "Error loading config file\n%1\nA default config is loaded and will be saved out.")
               .arg(configFilename));
     }
+
+#if defined(Q_OS_WIN32)
+    if(config.KernelInjectionEnable && !IsRunningAsAdmin())
+    {
+      QStringList elevatedArgs = application.arguments();
+      if(!elevatedArgs.isEmpty())
+        elevatedArgs.removeFirst();
+
+      qInfo() << "Kernel injection is enabled; restarting as administrator";
+
+      if(RunProcessAsAdmin(application.applicationFilePath(), elevatedArgs))
+      {
+        config.Close();
+        return 0;
+      }
+
+      // Do not immediately request elevation again if this process was itself opened with the
+      // internal kernel-capture switch. The menu remains available for an explicit retry.
+      kernelCaptureRequested = false;
+      RDDialog::warning(
+          NULL, tr("Kernel capture unavailable"),
+          tr("Administrator permission was not granted. RenderDic will continue normally, but "
+             "kernel capture is unavailable until elevation succeeds. Select Kernel Injection "
+             "from the File menu to try again."));
+    }
+#endif
 
     int replayHostIndex = -1;
     if(parser.isSet(replayhost))
@@ -682,7 +713,7 @@ int main(int argc, char *argv[])
 
       if(!pythonExited)
       {
-        ctx.Begin(filename, remoteHost, remoteIdent, temp, uiscriptFile);
+        ctx.Begin(filename, remoteHost, remoteIdent, temp, uiscriptFile, kernelCaptureRequested);
 
         while(ctx.isRunning())
         {

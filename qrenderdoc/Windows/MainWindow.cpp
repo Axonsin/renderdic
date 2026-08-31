@@ -671,6 +671,12 @@ void MainWindow::OnKernelCaptureTrigger(const QString &exe, const QString &worki
                                         std::function<void(LiveCapture *)> callback)
 {
 #if defined(Q_OS_WIN32)
+  if(!IsRunningAsAdmin())
+  {
+    RestartAsAdminForKernelCapture();
+    return;
+  }
+
   Q_UNUSED(workingDir);
   Q_UNUSED(cmdLine);
   Q_UNUSED(env);
@@ -2437,6 +2443,14 @@ void MainWindow::on_action_Inject_into_Process_triggered()
 
 void MainWindow::on_action_Inject_Kernel_triggered()
 {
+#if defined(Q_OS_WIN32)
+  if(!IsRunningAsAdmin())
+  {
+    RestartAsAdminForKernelCapture();
+    return;
+  }
+#endif
+
   ICaptureDialog *capDialog = m_Ctx.GetCaptureDialog();
 
   capDialog->SetKernelMode(true);
@@ -2445,6 +2459,90 @@ void MainWindow::on_action_Inject_Kernel_triggered()
     ToolWindowManager::raiseToolWindow(capDialog->Widget());
   else
     ui->toolWindowManager->addToolWindow(capDialog->Widget(), mainToolArea());
+}
+
+bool MainWindow::RestartAsAdminForKernelCapture()
+{
+#if defined(Q_OS_WIN32)
+  if(IsRunningAsAdmin())
+    return false;
+
+  if(RENDERDOC_IsGlobalHookActive())
+  {
+    RDDialog::critical(this, tr("Global hook active"),
+                       tr("Disable the global hook before restarting RenderDic as administrator."));
+    return false;
+  }
+
+  const bool hadCapture = m_Ctx.IsCaptureLoaded();
+  const QString capturePath = m_Ctx.GetCaptureFilename();
+  const bool captureTemporary = m_Ctx.IsCaptureTemporary();
+  const bool captureLocal = m_Ctx.IsCaptureLocal();
+  const bool ownedTemporaryCapture = m_OwnTempCapture;
+
+  auto restoreCapture = [this, hadCapture, capturePath, captureTemporary, captureLocal,
+                         ownedTemporaryCapture]() {
+    if(!hadCapture || (captureLocal && !QFileInfo::exists(capturePath)))
+      return;
+
+    LoadCapture(capturePath, m_Ctx.Config().DefaultReplayOptions, captureTemporary, captureLocal);
+    if(ownedTemporaryCapture)
+      takeCaptureOwnership();
+  };
+
+  if(!PromptCloseCapture())
+    return false;
+
+  bool noToAll = false;
+  QList<QPointer<LiveCapture>> liveCaptures;
+  int unsavedCaps = 0;
+  for(QPointer<LiveCapture> live : m_LiveCaptures)
+  {
+    unsavedCaps += live->unsavedCaptureCount();
+    liveCaptures.append(live);
+  }
+
+  for(QPointer<LiveCapture> live : liveCaptures)
+  {
+    if(live.isNull())
+      continue;
+
+    if(!noToAll && !live->checkAllowClose(unsavedCaps, noToAll))
+    {
+      restoreCapture();
+      return false;
+    }
+  }
+
+  QString capfile = ConfigFilePath(lit("most_recent.cap"));
+  ICaptureDialog *capDialog = m_Ctx.GetCaptureDialog();
+  capDialog->SaveSettings(capfile);
+  m_Ctx.Config().Save();
+
+  QStringList args;
+  args << lit("--kernel-capture") << capfile;
+
+  if(!RunProcessAsAdmin(qApp->applicationFilePath(), args))
+  {
+    restoreCapture();
+    return false;
+  }
+
+  for(QPointer<LiveCapture> live : liveCaptures)
+  {
+    if(live.isNull())
+      continue;
+
+    live->cleanItems();
+    delete live;
+  }
+
+  m_Ctx.Config().Close();
+  close();
+  return true;
+#else
+  return false;
+#endif
 }
 
 void MainWindow::on_action_Errors_and_Warnings_triggered()

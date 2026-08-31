@@ -230,7 +230,7 @@ CaptureContext::~CaptureContext()
 }
 
 void CaptureContext::Begin(QString paramFilename, QString remoteHost, uint32_t remoteIdent,
-                           bool temp, QString scriptFilename)
+                           bool temp, QString scriptFilename, bool openKernelCapture)
 {
   m_MainWindow->show();
 
@@ -259,6 +259,9 @@ void CaptureContext::Begin(QString paramFilename, QString remoteHost, uint32_t r
     if(GetPythonShell()->LoadScriptFromFilename(scriptFilename))
       GetPythonShell()->RunScript();
   }
+
+  if(openKernelCapture)
+    m_MainWindow->showKernelCaptureDialog();
 }
 
 bool CaptureContext::isRunning()

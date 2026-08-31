@@ -3007,13 +3007,6 @@ protected:
 
 #include <shellapi.h>
 
-typedef LSTATUS(APIENTRY *PFN_RegCreateKeyExA)(HKEY hKey, LPCSTR lpSubKey, DWORD Reserved,
-                                               LPSTR lpClass, DWORD dwOptions, REGSAM samDesired,
-                                               CONST LPSECURITY_ATTRIBUTES lpSecurityAttributes,
-                                               PHKEY phkResult, LPDWORD lpdwDisposition);
-
-typedef LSTATUS(APIENTRY *PFN_RegCloseKey)(HKEY hKey);
-
 #else
 
 #include <unistd.h>
@@ -3023,31 +3016,17 @@ typedef LSTATUS(APIENTRY *PFN_RegCloseKey)(HKEY hKey);
 bool IsRunningAsAdmin()
 {
 #if defined(Q_OS_WIN32)
-  // try to open HKLM\Software for write.
-  HKEY key = NULL;
-
-  // access dynamically to get around the pain of trying to link to extra window libs in qt
-  HMODULE mod = LoadLibraryA("advapi32.dll");
-
-  if(mod == NULL)
+  HANDLE token = NULL;
+  if(!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
     return false;
 
-  PFN_RegCreateKeyExA create = (PFN_RegCreateKeyExA)GetProcAddress(mod, "RegCreateKeyExA");
-  PFN_RegCloseKey close = (PFN_RegCloseKey)GetProcAddress(mod, "RegCloseKey");
+  TOKEN_ELEVATION elevation = {};
+  DWORD returned = 0;
+  BOOL success =
+      GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &returned);
+  CloseHandle(token);
 
-  LSTATUS ret = ERROR_PROC_NOT_FOUND;
-
-  if(create && close)
-  {
-    ret = create(HKEY_LOCAL_MACHINE, "SOFTWARE", 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &key, NULL);
-
-    if(key)
-      close(key);
-  }
-
-  FreeLibrary(mod);
-
-  return (ret == ERROR_SUCCESS);
+  return success && elevation.TokenIsElevated != 0;
 
 #else
 
@@ -3066,11 +3045,41 @@ bool RunProcessAsAdmin(const QString &fullExecutablePath, const QStringList &par
   std::wstring wideExe = QDir::toNativeSeparators(fullExecutablePath).toStdWString();
   std::wstring wideParams;
 
-  for(QString p : params)
+  auto quoteArgument = [](const std::wstring &arg) {
+    std::wstring quoted = L"\"";
+    size_t backslashes = 0;
+
+    for(wchar_t c : arg)
+    {
+      if(c == L'\\')
+      {
+        backslashes++;
+      }
+      else if(c == L'\"')
+      {
+        quoted.append(backslashes * 2 + 1, L'\\');
+        quoted += c;
+        backslashes = 0;
+      }
+      else
+      {
+        quoted.append(backslashes, L'\\');
+        quoted += c;
+        backslashes = 0;
+      }
+    }
+
+    // Backslashes before the closing quote must be doubled so they remain part of the argument.
+    quoted.append(backslashes * 2, L'\\');
+    quoted += L'\"';
+    return quoted;
+  };
+
+  for(const QString &p : params)
   {
-    wideParams += L"\"";
-    wideParams += p.toStdWString();
-    wideParams += L"\" ";
+    if(!wideParams.empty())
+      wideParams += L' ';
+    wideParams += quoteArgument(p.toStdWString());
   }
 
   SHELLEXECUTEINFOW info = {};
@@ -3081,9 +3090,18 @@ bool RunProcessAsAdmin(const QString &fullExecutablePath, const QStringList &par
   info.lpParameters = wideParams.c_str();
   info.nShow = hidden ? SW_HIDE : SW_SHOWNORMAL;
 
-  ShellExecuteExW(&info);
+  BOOL launched = ShellExecuteExW(&info);
 
-  if((uintptr_t)info.hInstApp > 32 && info.hProcess != NULL)
+  if(!launched)
+  {
+    DWORD err = GetLastError();
+    if(err == ERROR_CANCELLED)
+      qInfo() << "Administrator launch was cancelled by the user";
+    else
+      qWarning() << "Failed to launch process as administrator, error" << err;
+  }
+
+  if(launched && (uintptr_t)info.hInstApp > 32 && info.hProcess != NULL)
   {
     if(finishedCallback)
     {
