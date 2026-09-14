@@ -98,8 +98,10 @@ constexpr uint32_t kIoctlFreeContiguous = 0x2220C8;
 constexpr uint32_t kIoctlReadMsr = 0x222140;
 }    // namespace TbtProtocol
 
-// Maximum bytes transferred per physical R/W IOCTL. Kept well below
-// MmMapIoSpace's comfortable range; requests are chunked by the backends.
+// Buffer granularity for bulk physical reads (e.g. the PML4 scan). This is NOT
+// the per-IOCTL size: both drivers map the whole per-IOCTL transfer with one
+// unchecked MmMapIoSpace call, so the backends internally chunk requests down
+// to kMaxIoChunk (one page) in kernel_mem.cpp.
 constexpr size_t kMaxPhysChunk = 1024 * 1024;
 
 class KernelMem

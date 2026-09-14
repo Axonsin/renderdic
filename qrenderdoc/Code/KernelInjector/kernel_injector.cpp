@@ -37,6 +37,7 @@
 #include <sddl.h>
 #include <QDebug>
 #include <QThread>
+#include <QProcess>
 #include <QElapsedTimer>
 #include <QMutex>
 #include <QMutexLocker>
@@ -110,6 +111,36 @@ bool IsHVCIEnabled()
   RegCloseKey(key);
 
   return status == ERROR_SUCCESS && enabled != 0;
+}
+
+int QueryVbsStatus()
+{
+  // Virtualization-Based Security state from Win32_DeviceGuard: 0 = off,
+  // 1 = configured but not running, 2 = running. This is the authoritative
+  // source; the DeviceGuard registry values stay empty when VBS is on purely by
+  // OS default, and securekernel.exe (the VTL1 kernel) is hidden from
+  // SystemModuleInformation, so neither of those can detect it. Returns -1 if
+  // the query itself failed.
+  QProcess powershell;
+  powershell.start(
+      QStringLiteral("powershell"),
+      QStringList()
+          << QStringLiteral("-NoProfile") << QStringLiteral("-NonInteractive")
+          << QStringLiteral("-Command")
+          << QStringLiteral("(Get-CimInstance -Namespace root/Microsoft/Windows/DeviceGuard "
+                            "-ClassName Win32_DeviceGuard).VirtualizationBasedSecurityStatus"));
+  if(!powershell.waitForStarted(5000) || !powershell.waitForFinished(15000))
+  {
+    powershell.kill();
+    return -1;
+  }
+
+  if(powershell.exitStatus() != QProcess::NormalExit || powershell.exitCode() != 0)
+    return -1;
+
+  bool ok = false;
+  int status = QString::fromUtf8(powershell.readAllStandardOutput()).trimmed().toInt(&ok);
+  return ok ? status : -1;
 }
 
 bool CreateShimDataMapping(const KernelInjectorCore::CaptureRequest &req, HANDLE *outMapping,
@@ -242,6 +273,36 @@ bool EnsureChainUp(BackendId backend, QString *error)
         "requires it to be off - disable it under Windows Security -> Device Security and "
         "reboot before using kernel capture.");
     return false;
+  }
+
+  // VBS running is fatal for these backends in a nastier way than HVCI: the
+  // kernel refuses MmMapIoSpace of protected RAM pages per page and the
+  // vulnerable drivers never check for NULL, so the first protected page the
+  // PML4 scan touches bugchecks the machine (observed on Win11 with VBS on and
+  // all optional services off). A backend whose reads do not go through
+  // MmMapIoSpace (e.g. an MmCopyMemory-based one) would not need this gate.
+  {
+    const int vbs = QueryVbsStatus();
+    if(vbs < 0)
+    {
+      *error = QStringLiteral(
+          "Could not determine the Virtualization-Based Security state of this machine "
+          "(the Win32_DeviceGuard query failed). Kernel capture refuses to run when it "
+          "cannot prove VBS is off, because a VBS-protected RAM page would crash the "
+          "system instead of failing the read.");
+      return false;
+    }
+    if(vbs == 2)
+    {
+      *error = QStringLiteral(
+          "Virtualization-Based Security (VBS) is running on this machine. Under VBS "
+          "Windows refuses to map some RAM pages for drivers, and the vulnerable driver "
+          "backends crash the whole system when that happens mid-read. Disable VBS (set "
+          "HKLM\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\EnableVirtualizationBasedSecurity "
+          "to 0, also check Windows Security -> Device Security -> Core isolation) and "
+          "reboot, or use kernel capture on a machine or VM without VBS.");
+      return false;
+    }
   }
 
   // 0. The mapped injection driver can't be unmapped, so its device object
