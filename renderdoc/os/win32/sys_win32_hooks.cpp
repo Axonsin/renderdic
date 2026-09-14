@@ -24,6 +24,7 @@
  ******************************************************************************/
 
 #include <winsock2.h>
+#include <shellapi.h>
 #include "core/core.h"
 #include "hooks/hooks.h"
 #include "os/os_specific.h"
@@ -70,6 +71,8 @@ typedef BOOL(WINAPI *PFN_CREATE_PROCESS_WITH_LOGON_W)(LPCWSTR lpUsername, LPCWST
                                                       LPSTARTUPINFOW lpStartupInfo,
                                                       LPPROCESS_INFORMATION lpProcessInformation);
 
+typedef BOOL(WINAPI *PFN_SHELLEXECUTE_EXW)(SHELLEXECUTEINFOW *pExecInfo);
+
 class SysHook : LibraryHook
 {
 public:
@@ -101,6 +104,12 @@ public:
 
     CreateProcessWithLogonW.Register("advapi32.dll", "CreateProcessWithLogonW",
                                      CreateProcessWithLogonW_hook);
+
+    LibraryHooks::RegisterLibraryHook("shell32.dll", NULL);
+
+    // launchers commonly spawn a requireAdministrator child through ShellExecuteEx instead of
+    // CreateProcess, which would bypass every hook above and lose the child process
+    ShellExecuteExW.Register("shell32.dll", "ShellExecuteExW", ShellExecuteExW_hook);
 
     // handle API set exports if they exist. These don't really exist so we don't have to worry
     // about double hooking, and also they call into the 'real' implementation in kernelbase.dll
@@ -167,6 +176,8 @@ private:
   HookedFunction<PFN_CREATE_PROCESS_AS_USER_W> API112CreateProcessAsUserW;
 
   HookedFunction<PFN_CREATE_PROCESS_WITH_LOGON_W> CreateProcessWithLogonW;
+
+  HookedFunction<PFN_SHELLEXECUTE_EXW> ShellExecuteExW;
 
   HookedFunction<PFN_WSASTARTUP> WSAStartup;
   HookedFunction<PFN_WSACLEANUP> WSACleanup;
@@ -565,6 +576,61 @@ private:
         },
         dwCreationFlags, ShouldInject(lpApplicationName, lpCommandLine), lpEnvironment,
         lpProcessInformation);
+  }
+
+  static BOOL WINAPI ShellExecuteExW_hook(SHELLEXECUTEINFOW *pExecInfo)
+  {
+    if(syshooks.CheckRecurse())
+      return syshooks.ShellExecuteExW()(pExecInfo);
+
+    // ShellExecuteEx has no way to create the child suspended, so unlike the CreateProcess hooks
+    // above we can only inject after the original call returns and the child is already starting
+    // to run. Only propagate into executables - ShellExecuteEx is also how launchers open URLs
+    // and documents, and hooking the default browser was never the intent.
+    bool isExe = false;
+    if(pExecInfo->lpFile)
+    {
+      rdcstr file = strlower(StringFormat::Wide2UTF8(pExecInfo->lpFile));
+      isExe = file.size() >= 4 && file.substr(file.size() - 4) == ".exe";
+    }
+
+    bool inject = isExe && ShouldInject(pExecInfo->lpFile, pExecInfo->lpParameters);
+
+    DWORD oldMask = 0;
+    if(inject)
+    {
+      // ask for a process handle so we can identify the child, undone again below
+      oldMask = pExecInfo->fMask;
+      pExecInfo->fMask |= SEE_MASK_NOCLOSEPROCESS;
+    }
+
+    RDCDEBUG("Calling real ShellExecuteExW");
+    BOOL ret = syshooks.ShellExecuteExW()(pExecInfo);
+    RDCDEBUG("Called real ShellExecuteExW");
+
+    if(ret && inject && pExecInfo->hProcess)
+    {
+      RDCLOG("Intercepting ShellExecuteExW child %ls", pExecInfo->lpFile);
+
+      uint32_t pid = GetProcessId(pExecInfo->hProcess);
+
+      rdcpair<RDResult, uint32_t> res =
+          Process::InjectIntoProcess(pid, {}, RenderDoc::Inst().GetCaptureFileTemplate(),
+                                     RenderDoc::Inst().GetCaptureOptions(), false, false);
+
+      if(res.first == ResultCode::Succeeded)
+        RenderDoc::Inst().AddChildProcess(pid, res.second);
+    }
+
+    if(inject && !(oldMask & SEE_MASK_NOCLOSEPROCESS))
+    {
+      // the caller didn't ask to own a process handle, so close it and don't hand one out
+      CloseHandle(pExecInfo->hProcess);
+      pExecInfo->hProcess = NULL;
+    }
+
+    syshooks.EndRecurse();
+    return ret;
   }
 
   static BOOL WINAPI API110CreateProcessAsUserW_hook(
