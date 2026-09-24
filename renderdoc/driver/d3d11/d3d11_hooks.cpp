@@ -58,6 +58,16 @@ public:
     CreateDeviceAndSwapChain.Register("d3d11.dll", "D3D11CreateDeviceAndSwapChain",
                                       D3D11CreateDeviceAndSwapChain_hook);
 
+    // also register for any configured interposer layers the application may be routing its D3D11
+    // calls through. The registrations above win for the onward-called pointer, so these hooks
+    // forward to the real D3D11 exports.
+    for(const rdcstr &layer : GetExtraAPILayerModules())
+    {
+      CreateDevice.Register(layer.c_str(), "D3D11CreateDevice", D3D11CreateDevice_hook);
+      CreateDeviceAndSwapChain.Register(layer.c_str(), "D3D11CreateDeviceAndSwapChain",
+                                        D3D11CreateDeviceAndSwapChain_hook);
+    }
+
     m_RecurseSlot = Threading::AllocateTLSSlot();
     Threading::SetTLSValue(m_RecurseSlot, NULL);
   }

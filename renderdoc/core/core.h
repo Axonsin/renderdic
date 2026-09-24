@@ -62,6 +62,10 @@ struct PendingAnnotation
 bool is_exr_file(const byte *headerBuffer, size_t size);
 void LogReplayOptions(const ReplayOptions &opts);
 
+// Module names of API interposer/proxy layers (e.g. NVIDIA Streamline's sl.interposer.dll) which
+// take over the D3D11/D3D12/DXGI entry points, parsed from Driver.ExtraAPILayerModules.
+rdcarray<rdcstr> GetExtraAPILayerModules();
+
 enum class RDCDriver : uint32_t;
 
 class IRemoteDriver;

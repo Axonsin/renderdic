@@ -75,6 +75,34 @@ RDOC_CONFIG(rdcarray<rdcstr>, Replay_Shader_LimitedSearchDirPaths, {},
             "Companion array to DXBC.Debug.SearchDirPaths - listing paths which should not be "
             "searched exhaustively but only used for simple lookups.");
 
+// Some games route their D3D11/D3D12/DXGI calls through an interposer layer which claims the API
+// entry points before RenderDoc is loaded and resolves the real functions privately - so the
+// application's imports reference the interposer rather than the API DLLs, and the API hooks never
+// see the calls. The most common case is NVIDIA Streamline's sl.interposer.dll, pulled in by the UE
+// StreamlineCore plugin (DLSS/Frame Generation). Registering the API hooks for these module names
+// as well means the calls are still intercepted and capture works normally.
+RDOC_CONFIG(rdcstr, Driver_ExtraAPILayerModules, "sl.interposer.dll",
+            "Comma-separated list of extra module names which the D3D11/D3D12/DXGI entry point "
+            "hooks are also registered for. Intended for games whose API calls are routed through "
+            "an interposer/proxy layer, such as NVIDIA Streamline's sl.interposer.dll.");
+
+rdcarray<rdcstr> GetExtraAPILayerModules()
+{
+  rdcarray<rdcstr> ret;
+
+  rdcarray<rdcstr> modules;
+  split(Driver_ExtraAPILayerModules(), modules, ',');
+
+  for(rdcstr &mod : modules)
+  {
+    mod.trim();
+    if(!mod.empty())
+      ret.push_back(mod);
+  }
+
+  return ret;
+}
+
 void WriteAnnotation(SDObject *obj, RENDERDOC_AnnotationType valueType, uint32_t valueVectorWidth,
                      RENDERDOC_AnnotationValue value)
 {

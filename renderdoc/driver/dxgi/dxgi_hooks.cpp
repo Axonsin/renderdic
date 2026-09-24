@@ -256,6 +256,19 @@ public:
     CreateDXGIFactory2.Register("dxgi.dll", "CreateDXGIFactory2", CreateDXGIFactory2_hook);
     GetDebugInterface.Register("dxgi.dll", "DXGIGetDebugInterface", DXGIGetDebugInterface_hook);
     GetDebugInterface1.Register("dxgi.dll", "DXGIGetDebugInterface1", DXGIGetDebugInterface1_hook);
+
+    // also register for any configured interposer layers the application may be routing its DXGI
+    // calls through. The registrations above win for the onward-called pointer, so these hooks
+    // forward to the real DXGI functions rather than to the interposer.
+    for(const rdcstr &layer : GetExtraAPILayerModules())
+    {
+      CreateDXGIFactory.Register(layer.c_str(), "CreateDXGIFactory", CreateDXGIFactory_hook);
+      CreateDXGIFactory1.Register(layer.c_str(), "CreateDXGIFactory1", CreateDXGIFactory1_hook);
+      CreateDXGIFactory2.Register(layer.c_str(), "CreateDXGIFactory2", CreateDXGIFactory2_hook);
+      GetDebugInterface.Register(layer.c_str(), "DXGIGetDebugInterface", DXGIGetDebugInterface_hook);
+      GetDebugInterface1.Register(layer.c_str(), "DXGIGetDebugInterface1",
+                                  DXGIGetDebugInterface1_hook);
+    }
   }
 
 private:

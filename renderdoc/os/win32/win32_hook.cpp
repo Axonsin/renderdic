@@ -27,6 +27,7 @@
 #include <windows.h>
 
 #include <tlhelp32.h>
+#include <intrin.h>
 #include <algorithm>
 #include <functional>
 #include <map>
@@ -422,6 +423,11 @@ struct CachedHookData
                       applied = ApplyHook(*found, IATentry, already);
                     }
 
+                    if(applied && !already)
+                      RDCLOG("Hooked import %s!%s in %s", dllName, importName, modName);
+                    else if(!applied)
+                      RDCWARN("Failed to hook import %s!%s in %s", dllName, importName, modName);
+
                     // if we failed, or if it's already set and we're not doing a missedOrdinals
                     // second pass, then just bail out immediately as we've already hooked this
                     // module and there's no point wasting time re-hooking nothing
@@ -515,6 +521,111 @@ struct CachedHookData
       }
 
       importDesc++;
+    }
+
+    // Delay-loaded imports live in a separate import table and are resolved lazily by the module's
+    // own delay-load helper, which does not necessarily go through our LoadLibrary/GetProcAddress
+    // hooks. Games very commonly delay-load d3d12.dll / d3d11.dll / dxgi.dll, and for a protected
+    // process (anti-cheat) this can mean the application's API calls are never intercepted at all.
+    // Patch the delay-load import table as well, which also pre-empts the lazy resolution.
+    {
+      DWORD delayDirRVA = optHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].VirtualAddress;
+
+      if(delayDirRVA != 0)
+      {
+        PIMAGE_DELAYLOAD_DESCRIPTOR delayDesc =
+            (PIMAGE_DELAYLOAD_DESCRIPTOR)(baseAddress + delayDirRVA);
+
+        while(delayDesc->DllNameRVA && delayDesc->ImportNameTableRVA)
+        {
+          const char *delaydllName = (const char *)(baseAddress + delayDesc->DllNameRVA);
+
+          DllHookset *delayHookset = NULL;
+          for(auto it = DllHooks.begin(); it != DllHooks.end(); ++it)
+            if(!_stricmp(it->first.c_str(), delaydllName))
+              delayHookset = &it->second;
+
+          if(delayHookset && delayDesc->ImportAddressTableRVA)
+          {
+            // make sure the real module is loaded so the onward-called pointers are available -
+            // normally the delay-load helper does this on first use, and we want it to happen
+            // before anything can jump through a patched slot
+            if(delayHookset->module == NULL)
+            {
+              HMODULE realm = LoadLibraryA(delaydllName);
+
+              if(realm)
+              {
+                delayHookset->module = realm;
+
+                for(FunctionHook &hook : delayHookset->FunctionHooks)
+                {
+                  if(hook.orig && *hook.orig == NULL)
+                    *hook.orig = GetProcAddress(realm, hook.function.c_str());
+                }
+
+                delayHookset->FetchOrdinalNames();
+              }
+            }
+
+            if(delayHookset->module != NULL)
+            {
+              IMAGE_THUNK_DATA *origFirst =
+                  (IMAGE_THUNK_DATA *)(baseAddress + delayDesc->ImportNameTableRVA);
+              IMAGE_THUNK_DATA *first =
+                  (IMAGE_THUNK_DATA *)(baseAddress + delayDesc->ImportAddressTableRVA);
+
+              while(origFirst->u1.AddressOfData)
+              {
+                void **IATentry = (void **)&first->u1.AddressOfData;
+
+#if ENABLED(RDOC_X64)
+                if(!IMAGE_SNAP_BY_ORDINAL64(origFirst->u1.AddressOfData))
+#else
+                if(!IMAGE_SNAP_BY_ORDINAL32(origFirst->u1.AddressOfData))
+#endif
+                {
+                  const char *importName =
+                      (const char *)(baseAddress + origFirst->u1.AddressOfData + 2);
+
+                  for(FunctionHook &hook : delayHookset->FunctionHooks)
+                  {
+                    if(strcmp(hook.function.c_str(), importName) != 0)
+                      continue;
+
+                    if(ownmodule == module || hook.orig == NULL || *hook.orig == NULL)
+                      break;
+
+                    bool already = false;
+                    bool applied = false;
+                    {
+                      SCOPED_LOCK(lock);
+                      applied = ApplyHook(hook, IATentry, already);
+                    }
+
+                    if(applied && !already)
+                    {
+                      RDCLOG("Hooked delay-import %s!%s in %s", delaydllName, importName, modName);
+                    }
+                    else if(!applied)
+                    {
+                      RDCWARN("Failed to hook delay-import %s!%s in %s", delaydllName, importName,
+                              modName);
+                    }
+
+                    break;
+                  }
+                }
+
+                origFirst++;
+                first++;
+              }
+            }
+          }
+
+          delayDesc++;
+        }
+      }
     }
 
     FreeLibrary(refcountModHandle);
@@ -774,6 +885,29 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, const LPCSTR func)
     RDCDEBUG("Hooked_GetProcAddress(%p, %s)", mod, func);
 #endif
 
+  // Ignore resolutions performed by the API modules themselves. Proxy/interposer layers and OS
+  // loader modules (e.g. d3d12.dll resolving D3D12Core.dll's entry points) resolve the real
+  // functions in order to forward calls to them, and if we hand them our hook instead then their
+  // onward call comes straight back into us and loops forever.
+  {
+    MEMORY_BASIC_INFORMATION meminfo = {};
+    void *retAddr = _ReturnAddress();
+
+    if(VirtualQuery(retAddr, &meminfo, sizeof(meminfo)) == sizeof(meminfo))
+    {
+      for(auto it = s_HookData->DllHooks.begin(); it != s_HookData->DllHooks.end(); ++it)
+      {
+        bool isApiModule = (meminfo.AllocationBase == (void *)it->second.module);
+
+        for(size_t i = 0; !isApiModule && i < it->second.altmodules.size(); i++)
+          isApiModule = (meminfo.AllocationBase == (void *)it->second.altmodules[i]);
+
+        if(isApiModule)
+          return GetProcAddress(mod, func);
+      }
+    }
+  }
+
   for(auto it = s_HookData->DllHooks.begin(); it != s_HookData->DllHooks.end(); ++it)
   {
     if(it->second.module == NULL)
@@ -807,6 +941,25 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, const LPCSTR func)
 #if ENABLED(VERBOSE_DEBUG_HOOK)
       RDCDEBUG("Located module %s", it->first.c_str());
 #endif
+
+      // log dynamic resolution on the modules we hook, this is how a delay-loaded API is normally
+      // resolved - if these lines are missing for an API we expect to be hooked, the application
+      // resolved it through a path that bypasses us
+      if(!OrdinalAsString((void *)func))
+      {
+        bool hooked = false;
+        for(FunctionHook &hook : it->second.FunctionHooks)
+        {
+          if(!strcmp(hook.function.c_str(), func))
+          {
+            hooked = true;
+            break;
+          }
+        }
+
+        if(hooked)
+          RDCLOG("GetProcAddress(%s, %s) - returning hook", it->first.c_str(), func);
+      }
 
       LPCSTR searchFunc = func;
 

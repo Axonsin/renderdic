@@ -26,8 +26,10 @@
 #include <atomic>
 #include <QCoreApplication>
 #include <QDesktopServices>
+#include <QFile>
 #include <QFileDialog>
 #include <QDir>
+#include <QTime>
 #include <QFileInfo>
 #include <QKeyEvent>
 #include <QMimeData>
@@ -60,6 +62,10 @@
 
 #if defined(Q_OS_WIN32)
 #include "Code/KernelInjector/kernel_injector.h"
+
+// Defined in qrenderdoc.cpp: set by the hidden --kernel-auto command line
+// switch, preserved across the elevation restart.
+extern QString g_KernelAutoExe;
 #endif
 
 #define JSON_ID "rdocLayoutData"
@@ -85,6 +91,19 @@ MainWindow::MainWindow(ICaptureContext &ctx) : QMainWindow(NULL), ui(new Ui::Mai
   // it without a clear way to communicate that it is never supported
   ui->menu_File->removeAction(ui->action_Inject_into_Process);
   ui->menu_File->removeAction(ui->action_Inject_Kernel);
+#endif
+
+#if defined(Q_OS_WIN32)
+  // --kernel-auto: kick off the fully automated kernel capture once the event
+  // loop is running (the UI must be up first - the flow shows modal dialogs).
+  if(!g_KernelAutoExe.isEmpty())
+  {
+    QTimer::singleShot(1500, this, [this]() {
+      QString exe = g_KernelAutoExe;
+      g_KernelAutoExe.clear();
+      AutoKernelCapture(exe);
+    });
+  }
 #endif
 
   QToolTip::setPalette(palette());
@@ -2459,6 +2478,44 @@ void MainWindow::on_action_Inject_Kernel_triggered()
     ToolWindowManager::raiseToolWindow(capDialog->Widget());
   else
     ui->toolWindowManager->addToolWindow(capDialog->Widget(), mainToolArea());
+}
+
+void MainWindow::AutoKernelCapture(const QString &exe)
+{
+#if defined(Q_OS_WIN32)
+  // Trace file for automated runs: the pipeline's own logging goes to the UI
+  // log only, which an automated session cannot easily read.
+  auto trace = [](const QString &msg) {
+    QFile f(QDir::temp().filePath(lit("renderdic_kernel_auto.log")));
+    if(f.open(QIODevice::Append | QIODevice::Text))
+    {
+      f.write((QStringLiteral("[") + QTime::currentTime().toString(QStringLiteral("hh:mm:ss")) +
+               QStringLiteral("] ") + msg + QStringLiteral("\n"))
+                  .toUtf8());
+    }
+  };
+
+  trace(QStringLiteral("AutoKernelCapture start: %1").arg(exe));
+
+  if(!IsRunningAsAdmin())
+  {
+    trace(QStringLiteral("not elevated - requesting elevation"));
+    RestartAsAdminForKernelCapture();
+    return;
+  }
+
+  trace(QStringLiteral("elevated - starting kernel capture pipeline"));
+
+  CaptureOptions opts{};
+
+  OnKernelCaptureTrigger(exe, QFileInfo(exe).absolutePath(), QString(), {}, opts,
+                         [trace](LiveCapture *live) {
+                           trace(QStringLiteral("injection complete - auto-triggering 1 frame"));
+                           live->TriggerImmediateCapture(1);
+                         });
+#else
+  Q_UNUSED(exe);
+#endif
 }
 
 bool MainWindow::RestartAsAdminForKernelCapture()

@@ -32,6 +32,7 @@
 #include "d3d12_shader_cache.h"
 
 #include "driver/dx/official/D3D11On12On7.h"
+#include <intrin.h>
 
 typedef HRESULT(WINAPI *PFN_D3D12_ENABLE_EXPERIMENTAL_FEATURES)(UINT NumFeatures, const IID *pIIDs,
                                                                 void *pConfigurationStructs,
@@ -573,6 +574,39 @@ public:
     GetD3D11On12On7.Register("d3d11on12.dll", "GetD3D11On12On7Interface",
                              GetD3D11On12On7Interface_hook);
 
+    // also register for any configured interposer layers the application may be routing its D3D12
+    // calls through (e.g. NVIDIA Streamline's sl.interposer.dll). The registrations above win for
+    // the onward-called pointer, so these hooks forward to the real D3D12 exports.
+    for(const rdcstr &layer : GetExtraAPILayerModules())
+    {
+      CreateDevice.Register(layer.c_str(), "D3D12CreateDevice", D3D12CreateDevice_hook);
+      GetDebugInterface.Register(layer.c_str(), "D3D12GetDebugInterface",
+                                 D3D12GetDebugInterface_hook);
+      GetInterface.Register(layer.c_str(), "D3D12GetInterface", D3D12GetInterface_hook);
+      EnableExperimentalFeatures.Register(layer.c_str(), "D3D12EnableExperimentalFeatures",
+                                          D3D12EnableExperimentalFeatures_hook);
+    }
+
+    // report where the D3D12 entry points come from, so a proxy/interposer layer that is already
+    // active can be identified from the debug log
+    {
+      HMODULE realD3D12 = GetModuleHandleA("d3d12.dll");
+      void *realCreate = realD3D12 ? (void *)GetProcAddress(realD3D12, "D3D12CreateDevice") : NULL;
+
+      RDCLOG("D3D12CreateDevice in d3d12.dll: %p (module %s)", realCreate,
+             realD3D12 ? "loaded" : "not loaded");
+
+      for(const rdcstr &layer : GetExtraAPILayerModules())
+      {
+        HMODULE layermod = GetModuleHandleA(layer.c_str());
+        void *layerCreate =
+            layermod ? (void *)GetProcAddress(layermod, "D3D12CreateDevice") : NULL;
+
+        RDCLOG("D3D12CreateDevice in layer %s: %p (module %s)", layer.c_str(), layerCreate,
+               layermod ? "loaded" : "not loaded");
+      }
+    }
+
     m_RecurseSlot = Threading::AllocateTLSSlot();
     Threading::SetTLSValue(m_RecurseSlot, NULL);
   }
@@ -889,6 +923,23 @@ private:
                                                D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid,
                                                void **ppDevice)
   {
+    // report which module is doing the device creation - this identifies applications whose
+    // device creation is routed through a proxy/interposer layer rather than the API dll
+    {
+      MEMORY_BASIC_INFORMATION meminfo = {};
+      void *retAddr = _ReturnAddress();
+
+      if(VirtualQuery(retAddr, &meminfo, sizeof(meminfo)) == sizeof(meminfo))
+      {
+        char modname[MAX_PATH] = {};
+        if(GetModuleFileNameA((HMODULE)meminfo.AllocationBase, modname, MAX_PATH))
+        {
+          char *slash = strrchr(modname, '\\');
+          RDCLOG("D3D12CreateDevice called from %s", slash ? slash + 1 : modname);
+        }
+      }
+    }
+
     PFN_D3D12_CREATE_DEVICE createFunc = d3d12hooks.CreateDevice();
 
     if(!createFunc)

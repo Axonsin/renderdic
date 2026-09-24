@@ -347,6 +347,15 @@ SettingsDialog::SettingsDialog(ICaptureContext &ctx, QWidget *parent)
     kernelBackend = 0;
   ui->KernelInjection_Backend->setCurrentIndex(kernelBackend);
 
+  if(const SDObject *setting = RENDERDOC_GetConfigSetting("Driver.ExtraAPILayerModules"))
+  {
+    ui->ExtraAPILayerModules->setText(setting->AsString());
+  }
+  else
+  {
+    ui->ExtraAPILayerModules->setEnabled(false);
+  }
+
   ui->Capture_MultiTarget->addItem(lit("Default (active window)"));
   ui->Capture_MultiTarget->addItem(lit("All Vulkan devices (multiple .rdc)"));
 
@@ -1451,6 +1460,18 @@ void SettingsDialog::on_KernelInjection_Backend_currentIndexChanged(int index)
 
   m_Ctx.Config().KernelInjectionBackend = index;
   m_Ctx.Config().Save();
+}
+
+// advanced
+void SettingsDialog::on_ExtraAPILayerModules_textEdited(const QString &modules)
+{
+  if(m_Init)
+    return;
+
+  if(SDObject *setting = RENDERDOC_SetConfigSetting("Driver.ExtraAPILayerModules"))
+    setting->data.str = modules;
+
+  RENDERDOC_SaveConfigSettings();
 }
 
 // advanced

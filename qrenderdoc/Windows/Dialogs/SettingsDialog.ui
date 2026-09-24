@@ -750,6 +750,23 @@ with a more complex request layout. Try the other backend if the self-test fails
             </item>
            </widget>
           </item>
+          <item row="4" column="0">
+           <widget class="QLabel" name="extraAPILayerLabel">
+            <property name="toolTip">
+             <string>Some games route every D3D11/D3D12/DXGI call through an interposer layer, most commonly NVIDIA Streamline's sl.interposer.dll loaded by the UE StreamlineCore plugin (DLSS / Frame Generation). The interposer claims the API entry points before RenderDoc is loaded, which normally makes capture impossible. Module names listed here have the API hooks registered for them as well, so the application's calls are still intercepted. Comma-separated.</string>
+            </property>
+            <property name="text">
+             <string>Extra API layer modules</string>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="1">
+           <widget class="QLineEdit" name="ExtraAPILayerModules">
+            <property name="toolTip">
+             <string>Comma-separated module names to register the D3D11/D3D12/DXGI entry point hooks for, in addition to the API DLLs themselves. Default: sl.interposer.dll</string>
+            </property>
+           </widget>
+          </item>
          </layout>
         </widget>
        </item>

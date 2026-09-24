@@ -256,5 +256,9 @@ private:
 
   bool RestartAsAdminForKernelCapture();
 
+  // Fully automated kernel capture for --kernel-auto: elevates if needed, then
+  // runs the whole pipeline on the target exe and auto-triggers one frame.
+  void AutoKernelCapture(const QString &exe);
+
   bool isUnshareableDeviceInUse();
 };

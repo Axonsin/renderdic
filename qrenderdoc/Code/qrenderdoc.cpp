@@ -175,6 +175,11 @@ static QString tr(const char *string)
 #endif
 }
 
+// Set by --kernel-auto: full path of the target executable for a fully
+// automated kernel capture session (elevate -> wait for the process -> inject
+// -> auto-trigger one frame). Consumed by MainWindow's constructor.
+QString g_KernelAutoExe;
+
 void hideOption(QCommandLineOption &opt)
 {
 #if QT_VERSION >= QT_VERSION_CHECK(5, 8, 0)
@@ -369,6 +374,10 @@ int main(int argc, char *argv[])
   hideOption(kernelCapture);
   parser.addOption(kernelCapture);
 
+  QCommandLineOption kernelAuto(lit("kernel-auto"), QString(), lit("exe"));
+  hideOption(kernelAuto);
+  parser.addOption(kernelAuto);
+
   parser.addPositionalArgument(lit("filename"), tr("The file to open."));
 
   bool parsedCommands = parser.parse(application.arguments());
@@ -403,6 +412,8 @@ int main(int argc, char *argv[])
 
   bool temp = parser.isSet(tempfile);
   bool kernelCaptureRequested = parser.isSet(kernelCapture);
+
+  g_KernelAutoExe = parser.isSet(kernelAuto) ? parser.value(kernelAuto) : QString();
 
   QString remoteHost;
   uint remoteIdent = 0;
@@ -501,7 +512,7 @@ int main(int argc, char *argv[])
     }
 
 #if defined(Q_OS_WIN32)
-    if(config.KernelInjectionEnable && !IsRunningAsAdmin())
+    if((config.KernelInjectionEnable || !g_KernelAutoExe.isEmpty()) && !IsRunningAsAdmin())
     {
       QStringList elevatedArgs = application.arguments();
       if(!elevatedArgs.isEmpty())
@@ -518,6 +529,7 @@ int main(int argc, char *argv[])
       // Do not immediately request elevation again if this process was itself opened with the
       // internal kernel-capture switch. The menu remains available for an explicit retry.
       kernelCaptureRequested = false;
+      g_KernelAutoExe.clear();
       RDDialog::warning(
           NULL, tr("Kernel capture unavailable"),
           tr("Administrator permission was not granted. RenderDic will continue normally, but "

@@ -58,6 +58,15 @@ public:
   ~LiveCapture();
 
   void QueueCapture(int frameNumber, int numFrames);
+
+  // Automation hook: mirror of the immediate-capture button. Safe to call
+  // before the target control connection is up - the request is consumed by
+  // the connection thread as soon as the connection is established.
+  void TriggerImmediateCapture(int numFrames)
+  {
+    m_CaptureNumFrames = numFrames;
+    m_TriggerCapture.release();
+  }
   const QString &hostname() { return m_Hostname; }
   void cleanItems();
   void fileSaved(QString from, QString to);
