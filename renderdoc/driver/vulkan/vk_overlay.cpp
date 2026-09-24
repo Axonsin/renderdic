@@ -3000,6 +3000,11 @@ ResourceId VulkanReplay::RenderOverlay(ResourceId texid, FloatVector clearCol, D
           clearDepthAtt.clearValue.depthStencil.depth = depthClear;
           clearDepthAtt.clearValue.depthStencil.stencil = 0;
 
+          if(IsDepthOnlyFormat(iminfo.format))
+            clearDepthAtt.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+          else if(IsStencilOnlyFormat(iminfo.format))
+            clearDepthAtt.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+
           atts.push_back(clearDepthAtt);
         }
       }
@@ -3908,8 +3913,27 @@ ResourceId VulkanReplay::RenderOverlay(ResourceId texid, FloatVector clearCol, D
                   }
                   else if(d == VK_DYNAMIC_STATE_DEPTH_BIAS)
                   {
-                    vt->CmdSetDepthBias(Unwrap(cmd), state.bias.depth, state.bias.biasclamp,
-                                        state.bias.slope);
+                    if(m_pDriver->DepthBiasControl())
+                    {
+                      VkDepthBiasRepresentationInfoEXT reprInfo = {
+                          VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT,
+                      };
+                      VkDepthBiasInfoEXT info = {VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT, &reprInfo};
+
+                      info.depthBiasClamp = state.bias.biasclamp;
+                      info.depthBiasConstantFactor = state.bias.depth;
+                      info.depthBiasSlopeFactor = state.bias.slope;
+
+                      reprInfo.depthBiasExact = state.bias.exact;
+                      reprInfo.depthBiasRepresentation = state.bias.repr;
+
+                      vt->CmdSetDepthBias2EXT(Unwrap(cmd), &info);
+                    }
+                    else
+                    {
+                      vt->CmdSetDepthBias(Unwrap(cmd), state.bias.depth, state.bias.biasclamp,
+                                          state.bias.slope);
+                    }
                   }
                   else if(d == VK_DYNAMIC_STATE_BLEND_CONSTANTS)
                   {
@@ -4138,8 +4162,27 @@ ResourceId VulkanReplay::RenderOverlay(ResourceId texid, FloatVector clearCol, D
                   }
                   if(state.dynamicStates[VkDynamicDepthBias])
                   {
-                    vt->CmdSetDepthBias(Unwrap(cmd), state.bias.depth, state.bias.biasclamp,
-                                        state.bias.slope);
+                    if(m_pDriver->DepthBiasControl())
+                    {
+                      VkDepthBiasRepresentationInfoEXT reprInfo = {
+                          VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT,
+                      };
+                      VkDepthBiasInfoEXT info = {VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT, &reprInfo};
+
+                      info.depthBiasClamp = state.bias.biasclamp;
+                      info.depthBiasConstantFactor = state.bias.depth;
+                      info.depthBiasSlopeFactor = state.bias.slope;
+
+                      reprInfo.depthBiasExact = state.bias.exact;
+                      reprInfo.depthBiasRepresentation = state.bias.repr;
+
+                      vt->CmdSetDepthBias2EXT(Unwrap(cmd), &info);
+                    }
+                    else
+                    {
+                      vt->CmdSetDepthBias(Unwrap(cmd), state.bias.depth, state.bias.biasclamp,
+                                          state.bias.slope);
+                    }
                   }
                   if(state.dynamicStates[VkDynamicBlendConstants])
                   {

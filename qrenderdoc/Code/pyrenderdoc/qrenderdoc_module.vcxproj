@@ -152,7 +152,7 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\Interface\PersistantConfig.h" />
+    <ClInclude Include="..\Interface\PersistentConfig.h" />
     <ClInclude Include="..\Interface\QRDInterface.h" />
     <ClInclude Include="..\Interface\RemoteHost.h" />
   </ItemGroup>

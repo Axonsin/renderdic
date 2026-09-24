@@ -16,7 +16,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\Interface\PersistantConfig.h">
+    <ClInclude Include="..\Interface\PersistentConfig.h">
       <Filter>Interface</Filter>
     </ClInclude>
     <ClInclude Include="..\Interface\QRDInterface.h">

@@ -110,7 +110,7 @@ class VK_Indirect(rdtest.TestCase):
         if overlay == rd.DebugOverlay.ClearBeforePass:
             overlayTex = col_tex
 
-        picked = self.controller.PickPixel(overlayTex, x, y, rd.Subresource(), rd.CompType.UNorm)
+        picked = self.controller.PickPixel(overlayTex, x, y, rd.Subresource(), rd.CompType.Typeless)
         out.Shutdown()
         return picked
 
@@ -303,7 +303,7 @@ class VK_Indirect(rdtest.TestCase):
                         for s in self.samples:
                             x = s[0]
                             y = s[1]
-                            picked = self.controller.PickPixel(overlayTex, x, y, rd.Subresource(), rd.CompType.Float)
+                            picked = self.controller.PickPixel(overlayTex, x, y, rd.Subresource(), rd.CompType.Typeless)
                             if picked.floatValue != emptyPixel:
                                 empty = False
                             if expectEmpty and not empty:
@@ -314,6 +314,10 @@ class VK_Indirect(rdtest.TestCase):
                         out.Shutdown()
 
     def check_capture(self):
+
+        with rdtest.log.auto_section("Checking Indirect Action Names"):
+            if not self.check_indirect_action_name_consistency(self.controller):
+                raise rdtest.TestFailureException("Indirect action parameters do not match its event parameters")
 
         fill = self.find_action("vkCmdFillBuffer")
 
@@ -366,13 +370,13 @@ class VK_Indirect(rdtest.TestCase):
 
             # Rewind to the start of the capture
             action: rd.ActionDescription = dispatches.children[0]
-            while action.previous is not None:
-                action = action.previous
+            while action.previousAction is not None:
+                action = action.previousAction
 
             # Ensure we can select all actions
             while action is not None:
                 self.controller.SetFrameEvent(action.eventId, False)
-                action = action.next
+                action = action.nextAction
 
             rdtest.log.success("Selected all {} actions".format(level))
 

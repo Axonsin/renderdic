@@ -34,8 +34,8 @@ class CaptureDialog;
 }
 
 class QStandardItemModel;
-class LiveCapture;
 class MainWindow;
+class LiveCapture;
 class RDLabel;
 
 class CaptureDialog : public QFrame, public ICaptureDialog
@@ -45,10 +45,10 @@ class CaptureDialog : public QFrame, public ICaptureDialog
 public:
   typedef std::function<void(const QString &exe, const QString &workingDir, const QString &cmdLine,
                              const rdcarray<EnvironmentModification> &env, CaptureOptions opts,
-                             std::function<void(LiveCapture *)> callback)>
+                             std::function<void(ICaptureConnection *)> callback)>
       OnCaptureMethod;
   typedef std::function<void(uint32_t PID, const rdcarray<EnvironmentModification> &env, const QString &name,
-                             CaptureOptions opts, std::function<void(LiveCapture *)> callback)>
+                             CaptureOptions opts, std::function<void(ICaptureConnection *)> callback)>
       OnInjectMethod;
   typedef std::function<void(const QString &exe, const QString &workingDir, const QString &cmdLine,
                              const rdcarray<EnvironmentModification> &env, CaptureOptions opts,
@@ -79,7 +79,7 @@ public:
   void SetSettings(CaptureSettings settings) override;
   CaptureSettings Settings() override;
 
-  void TriggerCapture() override;
+  ICaptureConnection *Launch() override;
 
   void LoadSettings(const rdcstr &filename) override;
   void SaveSettings(const rdcstr &filename) override;
