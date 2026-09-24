@@ -357,6 +357,11 @@ SettingsDialog::SettingsDialog(ICaptureContext &ctx, QWidget *parent)
     ui->ExtraAPILayerModules->setEnabled(false);
   }
 
+  if(const SDObject *setting = RENDERDOC_GetConfigSetting("Driver.NTEEarlyChildCapture"))
+    ui->NTEEarlyChildCapture->setChecked(setting->AsBool());
+  else
+    ui->NTEEarlyChildCapture->setEnabled(false);
+
   ui->Capture_MultiTarget->addItem(lit("Default (active window)"));
   ui->Capture_MultiTarget->addItem(lit("All Vulkan devices (multiple .rdc)"));
 
@@ -1597,6 +1602,18 @@ void SettingsDialog::on_ExtraAPILayerModules_textEdited(const QString &modules)
 
   if(SDObject *setting = RENDERDOC_SetConfigSetting("Driver.ExtraAPILayerModules"))
     setting->data.str = modules;
+
+  RENDERDOC_SaveConfigSettings();
+}
+
+// advanced
+void SettingsDialog::on_NTEEarlyChildCapture_toggled(bool checked)
+{
+  if(m_Init)
+    return;
+
+  if(SDObject *setting = RENDERDOC_SetConfigSetting("Driver.NTEEarlyChildCapture"))
+    setting->data.basic.b = checked;
 
   RENDERDOC_SaveConfigSettings();
 }

@@ -26,6 +26,7 @@
 #include <winsock2.h>
 #include <shellapi.h>
 #include "core/core.h"
+#include "core/settings.h"
 #include "hooks/hooks.h"
 #include "os/os_specific.h"
 #include "strings/string_utils.h"
@@ -72,6 +73,11 @@ typedef BOOL(WINAPI *PFN_CREATE_PROCESS_WITH_LOGON_W)(LPCWSTR lpUsername, LPCWST
                                                       LPPROCESS_INFORMATION lpProcessInformation);
 
 typedef BOOL(WINAPI *PFN_SHELLEXECUTE_EXW)(SHELLEXECUTEINFOW *pExecInfo);
+
+RDOC_CONFIG(bool, Driver_NTEEarlyChildCapture, false,
+            "Launch the NTE game child suspended from its launcher for ordinary capture, and "
+            "hook the native DXGI parent factory retained by HTGame.exe. Only applies to the "
+            "observed HTGame.exe process chain.");
 
 class SysHook : LibraryHook
 {
@@ -343,6 +349,32 @@ private:
     if(!RenderDoc::Inst().GetCaptureOptions().hookIntoChildren)
       return false;
 
+    if(Driver_NTEEarlyChildCapture())
+    {
+      wchar_t currentExe[MAX_PATH] = {};
+      DWORD currentLen = GetModuleFileNameW(NULL, currentExe, MAX_PATH);
+      if(currentLen > 0 && currentLen < MAX_PATH)
+      {
+        const wchar_t *currentName = wcsrchr(currentExe, L'\\');
+        currentName = currentName ? currentName + 1 : currentExe;
+
+        // The observed capture chain is NTEGame.exe -> HTGame.exe. The launcher also starts
+        // NTEBrowser.exe, while the game starts service helpers; none render the game frame.
+        if(_wcsicmp(currentName, L"HTGame.exe") == 0)
+          return false;
+
+        if(_wcsicmp(currentName, L"NTEGame.exe") == 0)
+        {
+          if(!lpApplicationName)
+            return false;
+
+          const wchar_t *childName = wcsrchr(lpApplicationName, L'\\');
+          childName = childName ? childName + 1 : lpApplicationName;
+          return _wcsicmp(childName, L"HTGame.exe") == 0;
+        }
+      }
+    }
+
     bool inject = true;
 
     // sanity check to make sure we're not going to go into an infinity loop injecting into
@@ -602,6 +634,70 @@ private:
       // ask for a process handle so we can identify the child, undone again below
       oldMask = pExecInfo->fMask;
       pExecInfo->fMask |= SEE_MASK_NOCLOSEPROCESS;
+    }
+
+    // The NTE launcher uses ShellExecuteExW(open) for HTGame.exe. ShellExecuteExW returns after
+    // the child has started, which can leave an already-created native DXGI factory outside our
+    // wrappers. For this exact, opt-in case CreateProcessW is equivalent to opening the exe, and
+    // lets us keep its main thread suspended until ordinary user-mode injection is complete.
+    if(inject && Driver_NTEEarlyChildCapture() && pExecInfo->lpFile &&
+       (!pExecInfo->lpVerb || _wcsicmp(pExecInfo->lpVerb, L"open") == 0) &&
+       (oldMask & ~SEE_MASK_NOCLOSEPROCESS) == 0)
+    {
+      const wchar_t *filename = wcsrchr(pExecInfo->lpFile, L'\\');
+      filename = filename ? filename + 1 : pExecInfo->lpFile;
+
+      if(_wcsicmp(filename, L"HTGame.exe") == 0)
+      {
+        std::wstring commandLine = L"\"";
+        commandLine += pExecInfo->lpFile;
+        commandLine += L"\"";
+        if(pExecInfo->lpParameters && *pExecInfo->lpParameters)
+        {
+          commandLine += L" ";
+          commandLine += pExecInfo->lpParameters;
+        }
+
+        STARTUPINFOW startup = {};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESHOWWINDOW;
+        startup.wShowWindow = (WORD)pExecInfo->nShow;
+        PROCESS_INFORMATION child = {};
+
+        if(::CreateProcessW(pExecInfo->lpFile, &commandLine[0], NULL, NULL, FALSE,
+                            CREATE_SUSPENDED, NULL, pExecInfo->lpDirectory, &startup, &child))
+        {
+          RDCLOG("NTE early capture: created HTGame.exe suspended as process %lu", child.dwProcessId);
+
+          rdcpair<RDResult, uint32_t> res = Process::InjectIntoProcess(
+              child.dwProcessId, {}, RenderDoc::Inst().GetCaptureFileTemplate(),
+              RenderDoc::Inst().GetCaptureOptions(), false, true);
+
+          if(res.first == ResultCode::Succeeded)
+            RenderDoc::Inst().AddChildProcess(child.dwProcessId, res.second);
+          else
+            RDCWARN("NTE early capture: injection failed for process %lu: %s", child.dwProcessId,
+                    res.first.message.c_str());
+
+          ResumeThread(child.hThread);
+          CloseHandle(child.hThread);
+
+          pExecInfo->hInstApp = (HINSTANCE)33;
+          if(oldMask & SEE_MASK_NOCLOSEPROCESS)
+            pExecInfo->hProcess = child.hProcess;
+          else
+          {
+            CloseHandle(child.hProcess);
+            pExecInfo->hProcess = NULL;
+          }
+
+          syshooks.EndRecurse();
+          return TRUE;
+        }
+
+        RDCWARN("NTE early capture: CreateProcessW failed (%lu), using ShellExecuteExW",
+                GetLastError());
+      }
     }
 
     RDCDEBUG("Calling real ShellExecuteExW");

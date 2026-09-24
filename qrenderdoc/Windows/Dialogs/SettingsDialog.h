@@ -129,6 +129,7 @@ private slots:
   void on_KernelInjectionEnable_toggled(bool checked);
   void on_KernelInjection_Backend_currentIndexChanged(int index);
   void on_ExtraAPILayerModules_textEdited(const QString &modules);
+  void on_NTEEarlyChildCapture_toggled(bool checked);
   void on_Capture_MultiTarget_currentIndexChanged(int index);
 
   // manual slots

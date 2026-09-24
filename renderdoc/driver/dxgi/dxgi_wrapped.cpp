@@ -48,6 +48,148 @@ ID3DDevice *GetD3DDevice(IUnknown *pDevice)
   return wrapDevice;
 }
 
+// HTGame.exe can keep the native parent factory of the adapter it passes to D3D11CreateDevice.
+// Its CreateSwapChainForHwnd call then reaches DXGI with a wrapped D3D11 device. Patch only this
+// factory instance, under the opt-in NTE mode, so the native call receives the real device and the
+// resulting swapchain is still registered for ordinary RenderDoc capture.
+typedef HRESULT(STDMETHODCALLTYPE *NTECreateSwapChainForHwnd)(
+    IDXGIFactory2 *, IUnknown *, HWND, const DXGI_SWAP_CHAIN_DESC1 *,
+    const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *, IDXGIOutput *, IDXGISwapChain1 **);
+
+struct NTEFactoryHook
+{
+  IDXGIFactory2 *factory;
+  void **vtable;
+  NTECreateSwapChainForHwnd original;
+};
+
+static Threading::CriticalSection nteFactoryLock;
+static rdcarray<NTEFactoryHook> nteFactoryHooks;
+
+static HRESULT STDMETHODCALLTYPE NTECreateSwapChainForHwndHook(
+    IDXGIFactory2 *factory, IUnknown *device, HWND wnd, const DXGI_SWAP_CHAIN_DESC1 *desc,
+    const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreenDesc, IDXGIOutput *restrictToOutput,
+    IDXGISwapChain1 **swapchain)
+{
+  NTECreateSwapChainForHwnd original = NULL;
+  {
+    SCOPED_LOCK(nteFactoryLock);
+    for(const NTEFactoryHook &hook : nteFactoryHooks)
+    {
+      if(hook.factory == factory)
+      {
+        original = hook.original;
+        break;
+      }
+    }
+  }
+
+  if(original == NULL)
+  {
+    RDCERR("NTE DXGI factory hook has no onward function for %p", factory);
+    return E_UNEXPECTED;
+  }
+
+  ID3DDevice *wrappedDevice = GetD3DDevice(device);
+  if(wrappedDevice == NULL)
+    return original(factory, device, wnd, desc, fullscreenDesc, restrictToOutput, swapchain);
+
+  DXGI_SWAP_CHAIN_DESC1 localDesc = {};
+  if(desc)
+  {
+    localDesc = *desc;
+    localDesc.BufferUsage |= DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc = &localDesc;
+  }
+
+  if(!RenderDoc::Inst().GetCaptureOptions().allowFullscreen)
+    fullscreenDesc = NULL;
+
+  RDCLOG("NTE DXGI factory hook: CreateSwapChainForHwnd on %p with wrapped device %p", factory,
+         device);
+  HRESULT result = original(factory, wrappedDevice->GetRealIUnknown(), wnd, desc, fullscreenDesc,
+                            restrictToOutput, swapchain);
+  if(SUCCEEDED(result) && swapchain && *swapchain)
+    *swapchain = new WrappedIDXGISwapChain4(*swapchain, wnd, wrappedDevice);
+
+  return result;
+}
+
+void HookNTEFactoryFromAdapter(IDXGIAdapter *adapter)
+{
+  const SDObject *setting = RenderDoc::Inst().GetConfigSetting("Driver.NTEEarlyChildCapture");
+  if(!setting || !setting->AsBool() || !adapter)
+    return;
+
+  wchar_t exe[MAX_PATH] = {};
+  DWORD exeLen = GetModuleFileNameW(NULL, exe, MAX_PATH);
+  if(exeLen == 0 || exeLen >= MAX_PATH)
+    return;
+
+  const wchar_t *exeName = wcsrchr(exe, L'\\');
+  exeName = exeName ? exeName + 1 : exe;
+  if(_wcsicmp(exeName, L"HTGame.exe") != 0)
+    return;
+
+  IDXGIFactory2 *factory = NULL;
+  if(FAILED(adapter->GetParent(__uuidof(IDXGIFactory2), (void **)&factory)) || !factory)
+    return;
+
+  SCOPED_LOCK(nteFactoryLock);
+  for(const NTEFactoryHook &hook : nteFactoryHooks)
+  {
+    if(hook.factory == factory)
+    {
+      factory->Release();
+      return;
+    }
+  }
+
+  // QueryInterface may return a different tear-off pointer. Copy only the methods exposed on
+  // this exact interface pointer, leaving all other DXGI factory instances and vtables intact.
+  const IID *versions[] = {&__uuidof(IDXGIFactory7), &__uuidof(IDXGIFactory6),
+                           &__uuidof(IDXGIFactory5), &__uuidof(IDXGIFactory4),
+                           &__uuidof(IDXGIFactory3)};
+  const size_t methodCounts[] = {32, 30, 29, 28, 26};
+  size_t methodCount = 25;    // IDXGIFactory2
+  for(size_t i = 0; i < ARRAY_COUNT(versions); i++)
+  {
+    IUnknown *version = NULL;
+    if(SUCCEEDED(factory->QueryInterface(*versions[i], (void **)&version)) && version)
+    {
+      bool samePointer = (void *)version == (void *)factory;
+      version->Release();
+      if(samePointer)
+      {
+        methodCount = methodCounts[i];
+        break;
+      }
+    }
+  }
+
+  void **originalTable = *(void ***)factory;
+  void **patchedTable = new void *[methodCount];
+  memcpy(patchedTable, originalTable, methodCount * sizeof(void *));
+  NTECreateSwapChainForHwnd original =
+      (NTECreateSwapChainForHwnd)originalTable[15];    // IDXGIFactory2::CreateSwapChainForHwnd
+  patchedTable[15] = (void *)&NTECreateSwapChainForHwndHook;
+
+  // Keep the parent factory alive while its instance vtable points into RenderDoc.
+  nteFactoryHooks.push_back({factory, patchedTable, original});
+  void *previous = InterlockedCompareExchangePointer((PVOID volatile *)factory, patchedTable,
+                                                     originalTable);
+  if(previous != originalTable)
+  {
+    nteFactoryHooks.pop_back();
+    delete[] patchedTable;
+    factory->Release();
+    RDCWARN("NTE DXGI factory vtable changed before installation");
+    return;
+  }
+
+  RDCLOG("NTE DXGI factory hook installed on %p (%zu methods)", factory, methodCount);
+}
+
 bool RefCountDXGIObject::HandleWrap(const char *ifaceName, REFIID riid, void **ppvObject)
 {
   if(ppvObject == NULL || *ppvObject == NULL)

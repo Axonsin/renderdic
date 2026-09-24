@@ -154,6 +154,9 @@ public:
 
 struct ID3DDevice;
 
+// Opt-in compatibility for HTGame.exe when it uses an adapter's native parent factory.
+void HookNTEFactoryFromAdapter(IDXGIAdapter *adapter);
+
 struct IDXGISwapper
 {
   virtual ID3DDevice *GetD3DDevice() = 0;

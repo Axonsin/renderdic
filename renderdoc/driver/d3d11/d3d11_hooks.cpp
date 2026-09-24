@@ -197,6 +197,10 @@ private:
         if(ppSwapChain && *ppSwapChain)
           *ppSwapChain = new WrappedIDXGISwapChain4(
               *ppSwapChain, pSwapChainDesc ? pSwapChainDesc->OutputWindow : NULL, wrap);
+
+        // The NTE game retains the native parent factory of its adapter and creates the swapchain
+        // on that factory, bypassing the regular wrapped IDXGIFactory path.
+        HookNTEFactoryFromAdapter(pAdapter);
       }
     }
     else if(SUCCEEDED(ret))

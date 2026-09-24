@@ -768,6 +768,26 @@ with a more complex request layout. Try the other backend if the self-test fails
             </property>
            </widget>
           </item>
+          <item row="5" column="0">
+           <widget class="QLabel" name="nteEarlyChildCaptureLabel">
+            <property name="toolTip">
+             <string>When Capture Child Processes is enabled, launch only HTGame.exe from the NTE launcher suspended and inject the normal user-mode capture library before the game starts. This mode is off by default and does not enable kernel injection.</string>
+            </property>
+            <property name="text">
+             <string>NTE launcher/game compatibility</string>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="1">
+           <widget class="QCheckBox" name="NTEEarlyChildCapture">
+            <property name="toolTip">
+             <string>Captures HTGame.exe before startup and wraps its native DXGI parent factory. Restart the launcher capture after changing this setting.</string>
+            </property>
+            <property name="text">
+             <string/>
+            </property>
+           </widget>
+          </item>
          </layout>
         </widget>
        </item>

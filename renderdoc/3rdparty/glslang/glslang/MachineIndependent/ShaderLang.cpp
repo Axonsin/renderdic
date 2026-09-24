@@ -42,6 +42,7 @@
 // and the shading language compiler/linker.
 //
 #include <cstring>
+#include <atomic>
 #include <iostream>
 #include <sstream>
 #include <memory>
@@ -83,10 +84,25 @@ int NumberOfClients = 0;
 
 // global initialization lock
 #ifndef DISABLE_THREAD_SUPPORT
-std::mutex &init_lock()
+// This lock is used while the capture DLL is loading. An injected process may
+// already have an older MSVCP140.dll loaded, so avoid the DLL's std::mutex ABI.
+class InitLock {
+public:
+    void lock()
+    {
+        while (flag.test_and_set(std::memory_order_acquire)) {}
+    }
+
+    void unlock() { flag.clear(std::memory_order_release); }
+
+private:
+    std::atomic_flag flag = ATOMIC_FLAG_INIT;
+};
+
+InitLock &init_lock()
 {
-  std::mutex *lock = new std::mutex;
-  return *lock;
+    static InitLock lock;
+    return lock;
 }
 #endif
 
@@ -434,7 +450,7 @@ bool SetupBuiltinSymbolTable(int version, EProfile profile, const SpvVersion& sp
 
     // Make sure only one thread tries to do this at a time
 #ifndef DISABLE_THREAD_SUPPORT
-    const std::lock_guard<std::mutex> lock(init_lock());
+    const std::lock_guard<InitLock> lock(init_lock());
 #endif
 
     // See if it's already been done for this version/profile combination
@@ -1337,7 +1353,7 @@ bool CompileDeferred(
 int ShInitialize()
 {
 #ifndef DISABLE_THREAD_SUPPORT
-    const std::lock_guard<std::mutex> lock(init_lock());
+    const std::lock_guard<InitLock> lock(init_lock());
 #endif
     ++NumberOfClients;
 
@@ -1394,7 +1410,7 @@ void ShDestruct(ShHandle handle)
 int ShFinalize()
 {
 #ifndef DISABLE_THREAD_SUPPORT
-    const std::lock_guard<std::mutex> lock(init_lock());
+    const std::lock_guard<InitLock> lock(init_lock());
 #endif
     --NumberOfClients;
     assert(NumberOfClients >= 0);
