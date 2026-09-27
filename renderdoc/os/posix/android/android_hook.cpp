@@ -542,8 +542,12 @@ static void InstallHooksCommon()
   else
   {
     RDCWARN("Couldn't find __loader_dlopen, falling back to slow path for dlopen hooking");
-    LibraryHooks::RegisterFunctionHook("", FunctionHook("dlsym", NULL, (void *)&hooked_dlsym));
   }
+
+  // without interceptor-lib there are no inline hooks, so any function pointer that the
+  // application resolves with dlsym() would bypass our PLT/GOT rewrites. Intercept dlsym itself
+  // so that runtime-resolved pointers for hooked symbols get our wrappers.
+  LibraryHooks::RegisterFunctionHook("", FunctionHook("dlsym", NULL, (void *)&hooked_dlsym));
 
   LibraryHooks::RegisterFunctionHook(
       "", FunctionHook("android_dlopen_ext", NULL, (void *)&hooked_android_dlopen_ext));

@@ -242,6 +242,24 @@ void *GLHook::GetUnsupportedFunction(const char *name)
   if(ret)
     return ret;
 
+  // On Android the system GLES shim libraries may not export every extension symbol that the
+  // vendor driver provides, and the application can resolve it through a different library than
+  // our registered 'libEGL.so' handle. Search the GLES shims explicitly before giving up,
+  // otherwise our hook wrapper will call a NULL pointer and crash the process.
+  static const char *glesLibs[] = {
+      "libGLESv3.so", "libGLESv2.so", "libGLESv1_CM.so",
+  };
+  for(const char *lib : glesLibs)
+  {
+    void *h = dlopen(lib, RTLD_LAZY | RTLD_GLOBAL);
+    if(!h)
+      continue;
+
+    ret = dlsym(h, name);
+    if(ret)
+      return ret;
+  }
+
   RDCERR("Couldn't find real pointer for %s - will crash", name);
 
   return NULL;

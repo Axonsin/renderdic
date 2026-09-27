@@ -1138,7 +1138,9 @@ void WrappedOpenGL::DeleteContext(void *contextHandle)
 
   GLWindowingData savedContext;
 
-  if(existing.ctx == NULL)
+  // guard against contexts we never saw created (created before hooks were applied): the
+  // ContextData is default-constructed with a NULL shareGroup and would be dereferenced below
+  if(existing.ctx == NULL && ctxdata.shareGroup != NULL)
   {
     if(m_Platform.PushChildContext(existing, ctxdata.shareGroup->m_BackDoor, &savedContext))
     {
