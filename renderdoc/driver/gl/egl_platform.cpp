@@ -459,6 +459,11 @@ GLPlatform &GetEGLPlatform()
 
 EGLDispatchTable EGL = {};
 
+void **Android_GetEGLSwapOrigSlot()
+{
+  return (void **)&EGL.SwapBuffers;
+}
+
 bool EGLDispatchTable::PopulateForReplay()
 {
   RDCASSERT(RenderDoc::Inst().IsReplayApp());

@@ -113,6 +113,15 @@ Error TargetAARCH64::RewriteInstruction(const llvm::MCInst &inst,
                                         size_t offset,
                                         bool &possible_end_of_function) {
   switch (inst.getOpcode()) {
+    case llvm::AArch64::HINT: {
+      // HINT-space instructions (paciasp, bti c, nop, ...) are not PC-relative and
+      // relocate verbatim. Note the hook installation also preserves leading hints at
+      // the patched entry (see GetLeadingHintSkip in interceptor.cc) so PAC/BTI
+      // semantics stay intact for indirect callers.
+      possible_end_of_function = false;
+      codegen.AddInstruction(inst);
+      break;
+    }
     case llvm::AArch64::ADDXri:
     case llvm::AArch64::ANDXri:
     case llvm::AArch64::LDRXui:

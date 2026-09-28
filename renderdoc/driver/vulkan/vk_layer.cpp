@@ -119,12 +119,33 @@ void KeepLayerAlive()
 // we don't actually hook any modules here. This is just used so that it's called
 // at the right time in initialisation (after capture options are available) to
 // set environment variables
+#if ENABLED(RDOC_ANDROID)
+// applications that don't enable the implicit layer (gated or detected) still create their
+// instance through the loader's vkCreateInstance: intercept it and inject our layer name so
+// the loader chains us in for the instance.
+static VkResult(VKAPI_PTR *real_vkCreateInstance)(const VkInstanceCreateInfo *,
+                                                  const VkAllocationCallbacks *, VkInstance *);
+static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
+    const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
+    VkInstance *pInstance);
+#endif
+
 class VulkanHook : LibraryHook
 {
   VulkanHook() {}
   void RegisterHooks()
   {
     RDCLOG("Registering Vulkan hooks");
+
+#if ENABLED(RDOC_ANDROID)
+    // inject our layer into instances created through the loader. The destroy-guard in
+    // vk_misc_funcs.cpp (unknown-resource skip) keeps the frame-estimation module alive.
+    LibraryHooks::RegisterLibraryHook("libvulkan.so", NULL);
+    LibraryHooks::RegisterFunctionHook(
+        "libvulkan.so",
+        FunctionHook("vkCreateInstance", (void **)&real_vkCreateInstance,
+                     (void *)&hooked_vkCreateInstance_inject));
+#endif
 
     // we don't register any library or function hooks because we use the layer system
 
@@ -225,6 +246,54 @@ class VulkanHook : LibraryHook
 };
 
 VulkanHook VulkanHook::vkhooks;
+
+#if ENABLED(RDOC_ANDROID)
+// applications that don't enable the implicit layer (gated or detected) still create their
+// instance through the loader's vkCreateInstance: intercept it and inject our layer name so
+// the loader chains us in for the instance (declared above, defined here).
+static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
+    const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
+    VkInstance *pInstance)
+{
+  // inject exactly once: the process can host several VK instances (render core + auxiliary
+  // modules like the frame-estimation layer). Chaining both into the single global layer
+  // state mixes wrapped handles from independent instances and crashes. Auxiliary instances
+  // are created unlayered and stay self-consistent.
+  static bool injected = false;
+
+  if(injected || RenderDoc::Inst().IsReplayApp())
+    return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+
+  injected = true;
+
+  RDCLOG("vkCreateInstance intercepted - injecting " RENDERDOC_VULKAN_LAYER_NAME);
+
+  VkInstanceCreateInfo info = *pCreateInfo;
+  const char *layerName = RENDERDOC_VULKAN_LAYER_NAME;
+
+  rdcarray<const char *> layers;
+  bool present = false;
+  if(info.enabledLayerCount && info.ppEnabledLayerNames)
+  {
+    layers.resize(info.enabledLayerCount);
+    for(uint32_t i = 0; i < info.enabledLayerCount; i++)
+    {
+      layers[i] = info.ppEnabledLayerNames[i];
+      present |= !strcmp(layers[i], layerName);
+    }
+  }
+  if(!present)
+  {
+    layers.push_back(layerName);
+    info.enabledLayerCount = (uint32_t)layers.size();
+    info.ppEnabledLayerNames = &layers[0];
+  }
+
+  VkResult ret = real_vkCreateInstance(&info, pAllocator, pInstance);
+  RDCLOG("vkCreateInstance returned %d, instance %p", ret, pInstance ? *pInstance : NULL);
+  return ret;
+}
+#endif
 
 // RenderDoc State
 

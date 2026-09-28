@@ -222,7 +222,11 @@ void *intercept_dlopen(const char *filename, int flag)
     // We need to intercept requests for our own library, because the android loader makes the
     // completely ridiculous decision to load multiple copies of the same library into a process if
     // it's dlopen'd with different paths. This obviously breaks with our hook install.
-    if(strstr(filename, RENDERDOC_ANDROID_LIBRARY) || GetHookInfo().IsLibHook(rdcstr(filename)))
+    // Vendor driver paths are exempted: the system libEGL dlopen()s the vendor driver by full
+    // path, and vendor sonames can be in our library hook list - redirecting that would break
+    // driver initialisation completely.
+    if(strstr(filename, RENDERDOC_ANDROID_LIBRARY) ||
+       (!strstr(filename, "/vendor/") && GetHookInfo().IsLibHook(rdcstr(filename))))
     {
       HOOK_DEBUG_PRINT("Intercepting dlopen for %s", filename);
       return dlopen(RENDERDOC_ANDROID_LIBRARY, flag);
@@ -247,6 +251,15 @@ static int dl_iterate_callback(struct dl_phdr_info *info, size_t size, void *dat
 
   HOOK_DEBUG_PRINT("Hooking %s", soname.c_str());
   GetHookInfo().SetHooked(soname);
+
+  // never rewrite the exporting libraries' own GOT entries. libEGL's internal driver-loading
+  // path calls its own eglGetProcAddress while holding its init mutex, and redirecting that
+  // self-reference into our wrapper re-enters egl_init_drivers, which deadlocks the thread
+  // against itself and freezes the whole process (linker lock is held by our constructor at
+  // that point, so every other thread blocks in dlopen too). Application modules are still
+  // rewritten here, which is what actually captures frames.
+  if(GetHookInfo().IsLibHook(soname))
+    return 0;
 
   for(int ph = 0; ph < info->dlpi_phnum; ph++)
   {
@@ -430,6 +443,14 @@ pfnandroid_dlopen_ext real_android_dlopen_ext = NULL;
 pfn__loader_dlopen loader_dlopen = NULL;
 uint64_t suppressTLS = 0;
 
+// the swap-family hooks stashed at the end of PatchHookedFunctions, for HookLoadedVendorSwap
+// to apply against the vendor driver whenever it maps in.
+static rdcarray<FunctionHook> vendorSwapHooks;
+
+// defined below: interceptor builds inline hook the swap family on the vendor driver once
+// its image is mapped; non-interceptor builds are a no-op.
+static void HookLoadedVendorSwap();
+
 void process_dlopen(const char *filename, int flag)
 {
   if(filename && !GetHookInfo().IsHooked(rdcstr(filename)))
@@ -460,7 +481,14 @@ extern "C" __attribute__((visibility("default"))) void *hooked_dlopen(const char
   HOOK_DEBUG_PRINT("Got %p", ret);
 
   if(filename && ret)
+  {
     process_dlopen(filename, flag);
+
+    // vendor drivers load through here after our init - apply the inline swap hooks now
+    // that the image exists (see HookLoadedVendorSwap).
+    if(strstr(filename, "libEGL_adreno"))
+      HookLoadedVendorSwap();
+  }
 
   return ret;
 }
@@ -484,7 +512,12 @@ extern "C" __attribute__((visibility("default"))) void *hooked_android_dlopen_ex
   HOOK_DEBUG_PRINT("Got %p", ret);
 
   if(__filename && ret)
+  {
     process_dlopen(__filename, __flags);
+
+    if(strstr(__filename, "libEGL_adreno"))
+      HookLoadedVendorSwap();
+  }
 
   return ret;
 }
@@ -493,6 +526,27 @@ bool hooks_suppressed();
 
 extern "C" __attribute__((visibility("default"))) void *hooked_dlsym(void *handle, const char *symbol)
 {
+  // RTLD_DEFAULT / RTLD_NEXT searches resolve into whichever library actually exports the
+  // symbol - commonly libEGL.so for EGL entry points. Applications that look up EGL functions
+  // with these special handles instead of a dlopen'd handle would otherwise get unhooked real
+  // pointers. Resolve for real, and wrap only when the resolution landed in a hooked library.
+  if((handle == RTLD_DEFAULT || handle == RTLD_NEXT) && symbol != NULL && !hooks_suppressed())
+  {
+    void *ret = dlsym(handle, symbol);
+    if(ret == NULL)
+      return NULL;
+
+    const FunctionHook repl = GetHookInfo().GetFunctionHook(symbol);
+    if(repl.hook)
+    {
+      Dl_info info = {};
+      if(dladdr(ret, &info) != 0 && info.dli_fname != NULL &&
+         GetHookInfo().IsLibHook(rdcstr(info.dli_fname)))
+        return repl.hook;
+    }
+    return ret;
+  }
+
   if(handle == NULL || symbol == NULL || hooks_suppressed())
     return dlsym(handle, symbol);
 
@@ -516,10 +570,28 @@ extern "C" __attribute__((visibility("default"))) void *hooked_dlsym(void *handl
   }
 
   void *ret = dlsym(handle, symbol);
+
+  if(ret == NULL)
+    return NULL;
+
   Dl_info info = {};
   dladdr(ret, &info);
   HOOK_DEBUG_PRINT("real ret is %p in %s", ret, info.dli_fname);
-  return ret;
+
+  // If the library at this handle genuinely exports the symbol, we want our wrapper instead of
+  // the real pointer. Custom EGL/GLES loaders dlopen the vendor driver directly and dlsym()
+  // the standard egl*/gl* entry points from it, bypassing the system libEGL.so/libGLESv2.so
+  // that our registered library hooks cover. The vendor EGL driver (libEGL_adreno.so) lives in
+  // the sphal namespace and is not dlopen-able from here, so check the resolved filename
+  // instead. Symbols that don't resolve are still NULL, as they would be without hooking.
+  if(info.dli_fname != NULL && strstr(info.dli_fname, "libEGL_adreno") != NULL)
+  {
+    HOOK_DEBUG_PRINT("identified dlsym(%s) into vendor EGL - returning %p", symbol, repl.hook);
+    return repl.hook;
+  }
+
+  HOOK_DEBUG_PRINT("identified dlsym(%s) we want to interpose! returning %p", symbol, repl.hook);
+  return repl.hook;
 }
 
 static void InstallHooksCommon()
@@ -561,6 +633,178 @@ void intercept_error(void *, const char *error_msg)
 }
 
 #include "interceptor-lib/include/interceptor.h"
+
+// NTE-class applications bind their swap entry point straight to the vendor driver
+// (libEGL_adreno.so, loaded into the sphal namespace - not reachable with dlopen() from our
+// namespace). Once the driver image is mapped, locate it through /proc/self/maps, resolve the
+// swap family from the on-disk dynsym and inline hook it. EGL.SwapBuffers is pointed at the
+// vendor trampoline so the wrapper drives the vendor implementation instead of bouncing back
+// through the system libEGL dispatch, which would re-enter the patched vendor entry.
+static void HookLoadedVendorSwap()
+{
+  const char *kPath = "/vendor/lib64/egl/libEGL_adreno.so";
+
+  // find the load bias from the lowest mapping of the file
+  uint64_t bias = 0;
+  bool mapped = false;
+  {
+    FILE *maps = FileIO::fopen("/proc/self/maps", FileIO::ReadText);
+    if(!maps)
+      return;
+    char line[512];
+    while(fgets(line, sizeof(line), maps))
+    {
+      if(strstr(line, kPath) == NULL)
+        continue;
+      unsigned long start = 0, end = 0, off = 0;
+      if(sscanf(line, "%lx-%lx %*s %lx", &start, &end, &off) != 3)
+        continue;
+      if(off == 0 || !mapped)
+      {
+        bias = start - off;
+        mapped = true;
+      }
+      if(off == 0)
+        break;
+    }
+    FileIO::fclose(maps);
+  }
+
+  if(!mapped)
+    return;
+
+  RDCLOG("Found loaded %s at bias 0x%llx - hooking vendor swap", kPath,
+         (unsigned long long)bias);
+
+  rdcarray<FunctionHook> funchooks;
+  if(!vendorSwapHooks.empty())
+    funchooks = vendorSwapHooks;
+  else
+    funchooks = GetHookInfo().GetFunctionHooks();
+  const char *want[] = {
+      "eglSwapBuffers", "eglSwapBuffersWithDamageKHR", "eglSwapBuffersWithDamageEXT",
+      "eglPostSubBufferNV",
+  };
+
+  void *intercept = InitializeInterceptor();
+
+  FILE *elf = FileIO::fopen(kPath, FileIO::ReadText);
+  if(!elf)
+    return;
+
+  ElfW(Ehdr) ehdr;
+  FileIO::fseek64(elf, 0, SEEK_SET);
+  if(FileIO::fread(&ehdr, sizeof(ehdr), 1, elf) != 1 ||
+     memcmp(ehdr.e_ident, ELFMAG, 4) != 0)
+  {
+    FileIO::fclose(elf);
+    return;
+  }
+
+  rdcarray<ElfW(Phdr)> phdrs;
+  phdrs.resize(ehdr.e_phnum);
+  FileIO::fseek64(elf, ehdr.e_phoff, SEEK_SET);
+  if(FileIO::fread(&phdrs[0], sizeof(ElfW(Phdr)), ehdr.e_phnum, elf) != (size_t)ehdr.e_phnum)
+  {
+    FileIO::fclose(elf);
+    return;
+  }
+
+  auto vaddr_to_file = [&phdrs](ElfW(Addr) v) -> uint64_t {
+    for(const ElfW(Phdr) &ph : phdrs)
+      if(ph.p_type == PT_LOAD && v >= ph.p_vaddr && v < ph.p_vaddr + ph.p_memsz)
+        return ph.p_offset + (v - ph.p_vaddr);
+    return v;
+  };
+
+  ElfW(Addr) symtab = 0, strtab = 0;
+  size_t strsz = 0;
+  for(const ElfW(Phdr) &ph : phdrs)
+  {
+    if(ph.p_type != PT_DYNAMIC)
+      continue;
+    size_t dyncount = ph.p_filesz / sizeof(ElfW(Dyn));
+    rdcarray<ElfW(Dyn)> dyns;
+    dyns.resize(dyncount);
+    FileIO::fseek64(elf, ph.p_offset, SEEK_SET);
+    if(FileIO::fread(&dyns[0], sizeof(ElfW(Dyn)), dyncount, elf) != dyncount)
+      break;
+    for(const ElfW(Dyn) &d : dyns)
+    {
+      if(d.d_tag == DT_SYMTAB)
+        symtab = d.d_un.d_ptr;
+      else if(d.d_tag == DT_STRTAB)
+        strtab = d.d_un.d_ptr;
+      else if(d.d_tag == DT_STRSZ)
+        strsz = d.d_un.d_val;
+    }
+    break;
+  }
+
+  if(!symtab || !strtab || !strsz)
+  {
+    FileIO::fclose(elf);
+    return;
+  }
+
+  uint64_t sym_file = vaddr_to_file(symtab);
+  uint64_t str_file = vaddr_to_file(strtab);
+  size_t symcount = (strtab > symtab) ? (strtab - symtab) / sizeof(ElfW(Sym)) : 0;
+
+  for(size_t i = 0; i < symcount; i++)
+  {
+    ElfW(Sym) sym;
+    FileIO::fseek64(elf, sym_file + i * sizeof(ElfW(Sym)), SEEK_SET);
+    if(FileIO::fread(&sym, sizeof(sym), 1, elf) != 1)
+      break;
+    if(sym.st_value == 0 || sym.st_name == 0 || sym.st_name >= strsz)
+      continue;
+
+    char name[128] = {};
+    FileIO::fseek64(elf, str_file + sym.st_name, SEEK_SET);
+    if(FileIO::fread(name, 1, sizeof(name) - 1, elf) == 0)
+      continue;
+
+    for(const char *w : want)
+    {
+      if(strcmp(name, w) != 0)
+        continue;
+
+      for(FunctionHook &h : funchooks)
+      {
+        if(h.function != w || h.hook == NULL)
+          continue;
+
+        void *target = (void *)(uintptr_t)(bias + sym.st_value);
+        if(GetHookInfo().IsHooked(target))
+          break;
+
+        void *tramp = NULL;
+        bool success = InterceptFunction(intercept, target, h.hook, &tramp, &intercept_error);
+        if(!success)
+        {
+          RDCERR("Failed to hook vendor %s at %p", w, target);
+          break;
+        }
+
+        RDCLOG("Hooked vendor %s at %p", w, target);
+        GetHookInfo().SetHooked(target);
+        if(h.orig)
+          *h.orig = tramp;
+        break;
+      }
+    }
+  }
+
+  FileIO::fclose(elf);
+}
+
+// exposed for egl_hooks.cpp: called after EGL driver initialisation, when the vendor driver
+// is guaranteed to be mapped.
+void Android_HookVendorSwap()
+{
+  HookLoadedVendorSwap();
+}
 
 void PatchHookedFunctions()
 {
@@ -615,6 +859,37 @@ void PatchHookedFunctions()
       if(GetHookInfo().IsHooked(oldfunc))
         continue;
 
+      // these EGL entry points are called re-entrantly by libEGL's own driver-loading code
+      // while it holds its driver-init mutex (seen on Adreno/Android 15). Inline-hooking their
+      // prologues would redirect that internal call into our wrappers, which call onwards into
+      // the real functions and deadlock against the init mutex. Leave them to the PLT fallback
+      // below: application GOT entries and dlsym() still intercept them, only libEGL's own
+      // internal calls stay stock.
+      //
+      // The same fallback applies to every non-swap EGL entry point: GOT/dlsym interception
+      // already covers application callers for them, and keeping them off the inline-hook
+      // path minimises the surface for prologue-relocation surprises on hardened (BTI/PAC)
+      // Android 15 libraries. Only the swap family strictly needs inline hooks, because the
+      // application can cache those pointers before our GOT rewrite lands.
+      bool swapFamily = !strncmp(hook.function.c_str(), "eglSwapBuffers", 14) ||
+                        !strncmp(hook.function.c_str(), "eglPostSubBuffer", 16);
+      bool adrenoEGL = lib.contains("libEGL_adreno");
+      bool vulkan = !strncmp(hook.function.c_str(), "vk", 2);
+
+      // the swap family is inline hooked on the vendor driver only: applications that bypass
+      // the system libEGL hit the vendor entry directly, and hooking both would let the
+      // system and vendor wrappers recurse into each other endlessly.
+      // vulkan hooks must stay inline: UE-class applications load libvulkan dynamically and
+      // resolve every entry point with dlsym(), so no GOT rewrite can ever see their calls -
+      // the prologue patch on vkGetInstanceProcAddr & co. is the only interception point.
+      if(!(vulkan || (swapFamily && adrenoEGL)))
+      {
+        RDCLOG("Deferring %s to PLT hooking", hook.function.c_str());
+        fallbacklibs.insert(lib);
+        fallbackhooks.insert(hook);
+        continue;
+      }
+
       if(!oldfunc)
       {
         HOOK_DEBUG_PRINT("%s didn't have %s", lib.c_str(), hook.function.c_str());
@@ -655,6 +930,18 @@ void PatchHookedFunctions()
   // into the process.
   // Unfortunately, interceptor-lib can't hook this function so we need to set up the PLT hooking.
   // This is just a minimal setup to intercept that one function.
+  // the swap-family hooks are stashed first: HookLoadedVendorSwap needs their wrappers when
+  // the vendor driver maps in later, but ClearHooks() resets the registry.
+  vendorSwapHooks.clear();
+  for(const FunctionHook &hook : funchooks)
+  {
+    if(!strncmp(hook.function.c_str(), "eglSwapBuffers", 14) ||
+       !strncmp(hook.function.c_str(), "eglPostSubBuffer", 16))
+      vendorSwapHooks.push_back(hook);
+  }
+
+  HookLoadedVendorSwap();
+
   GetHookInfo().ClearHooks();
 
   for(const rdcstr &l : fallbacklibs)
@@ -671,6 +958,14 @@ void PatchHookedFunctions()
 }
 
 #else
+
+static void HookLoadedVendorSwap()
+{
+}
+
+void Android_HookVendorSwap()
+{
+}
 
 void PatchHookedFunctions()
 {

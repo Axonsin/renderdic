@@ -260,6 +260,28 @@ void *GLHook::GetUnsupportedFunction(const char *name)
       return ret;
   }
 
+  // Last resort on Android: vendor GLES drivers can export extension symbols that no library
+  // exports in a dlsym-able way from our handle - they are only reachable through
+  // eglGetProcAddress. Fetch the real (unhooked) eglGetProcAddress and ask it, so our extension
+  // wrapper doesn't call a NULL pointer and crash the process.
+#if ENABLED(RDOC_ANDROID)
+  if(ret == NULL)
+  {
+    void *libegl = dlopen("libEGL.so", RTLD_LAZY | RTLD_GLOBAL);
+    if(libegl)
+    {
+      typedef void *(*pfn_eglgetprocaddress)(const char *);
+      pfn_eglgetprocaddress eglGPA = (pfn_eglgetprocaddress)dlsym(libegl, "eglGetProcAddress");
+      if(eglGPA)
+      {
+        // suppress so any internal driver symbol resolution gets real pointers
+        ScopedSuppressHooking suppress;
+        ret = (void *)eglGPA(name);
+      }
+    }
+  }
+#endif
+
   RDCERR("Couldn't find real pointer for %s - will crash", name);
 
   return NULL;

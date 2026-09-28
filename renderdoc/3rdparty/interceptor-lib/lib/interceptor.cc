@@ -74,14 +74,20 @@ class InterceptorImpl {
   Error GetTrampolineSize(const TrampolineConfig &config, void *old_function,
                           void *new_function, size_t &trampoline_size);
 
-  Error InstallTrampoline(const TrampolineConfig &config, void *old_function,
-                          void *new_function);
-
   Error RewriteInstructions(void *old_function, size_t rewrite_size,
-                            std::unique_ptr<CodeGenerator> &codegen);
+                            std::unique_ptr<CodeGenerator> &codegen,
+                            size_t skip_bytes = 0, void **bti_slot = nullptr,
+                            bool bti_at_entry = false);
 
   Error CreateCompensationFunction(void *old_function, size_t rewrite_size,
-                                   void **callback_function);
+                                   void **callback_function,
+                                   size_t skip_bytes = 0,
+                                   void **bti_slot = nullptr,
+                                   bool bti_at_entry = false);
+
+  Error InstallTrampoline(const TrampolineConfig &config, void *old_function,
+                          void *new_function, size_t skip_bytes = 0,
+                          const void *bti_slot = nullptr);
 
   Linker linker_;
   std::unique_ptr<Target> target_;
@@ -219,7 +225,8 @@ Error InterceptorImpl::GetTrampolineSize(const TrampolineConfig &config,
 
 Error InterceptorImpl::InstallTrampoline(const TrampolineConfig &config,
                                          void *old_function,
-                                         void *new_function) {
+                                         void *new_function, size_t skip_bytes,
+                                         const void *bti_slot) {
   size_t initial_alignment = GetCodeAligment(target_.get(), old_function);
   std::unique_ptr<CodeGenerator> codegen(
       target_->GetCodeGenerator(old_function, initial_alignment));
@@ -232,23 +239,46 @@ Error InterceptorImpl::InstallTrampoline(const TrampolineConfig &config,
   codegen->LayoutCode();
 
   void *load_address = target_->GetLoadAddress(old_function);
-  codegen->LinkCode(reinterpret_cast<uintptr_t>(load_address));
+  void *patch_address = static_cast<uint8_t *>(load_address) + skip_bytes;
+  codegen->LinkCode(reinterpret_cast<uintptr_t>(patch_address));
 
   const llvm::SmallVectorImpl<char> &trampoline = codegen->GetCode();
 
   std::vector<uint8_t> original_code(trampoline.size());
-  memcpy(original_code.data(), load_address, trampoline.size());
+  memcpy(original_code.data(), patch_address, trampoline.size());
 
-  error = WriteMemory(load_address, trampoline.data(), trampoline.size(), true);
+  error = WriteMemory(patch_address, trampoline.data(), trampoline.size(), true);
   if (error.Fail()) return error;
 
-  original_codes_.emplace(load_address, std::move(original_code));
+  // the compensation function's indirect jump-back lands here. On BTI-protected
+  // pages the landing instruction must be a bti; sequential execution treats it
+  // as a no-op so the program is unaffected.
+  if (bti_slot) {
+    const uint32_t bti_c = 0xD503249F;
+    error =
+        WriteMemory(const_cast<void *>(bti_slot), &bti_c, sizeof(bti_c), true);
+    if (error.Fail()) return error;
+  }
+
+  original_codes_.emplace(patch_address, std::move(original_code));
   return Error();
+}
+
+// ARMv8.1+ pointer-authentication and branch-target identification land in the HINT
+// instruction space (paciasp, bti c, ...) at function entry. They must stay at the entry:
+// indirect callers branch there, and PAC signing / BTI landing semantics depend on them
+// executing first. Returns how many bytes of leading hints to preserve before patching.
+static size_t GetLeadingHintSkip(void *old_function) {
+  const uint32_t *instrs = static_cast<const uint32_t *>(old_function);
+  size_t skip = 0;
+  while (skip < 8 && (instrs[skip / 4] & 0xFFFFFC1F) == 0xD503201F) skip += 4;
+  return skip;
 }
 
 Error InterceptorImpl::RewriteInstructions(
     void *old_function, size_t rewrite_size,
-    std::unique_ptr<CodeGenerator> &codegen) {
+    std::unique_ptr<CodeGenerator> &codegen, size_t skip_bytes,
+    void **bti_slot, bool bti_at_entry) {
   codegen.reset(target_->GetCodeGenerator(old_function, 0));
   if (!codegen) return Error("Failed to create codegen");
 
@@ -256,10 +286,25 @@ Error InterceptorImpl::RewriteInstructions(
       target_->CreateDisassembler(old_function));
   if (!disassembler) return Error("Failed to create disassembler");
 
-  size_t offset = 0;
+  size_t offset = skip_bytes;
   void *func_addr = target_->GetLoadAddress(old_function);
   bool reached_end_of_function = false;
-  while (offset < rewrite_size && !reached_end_of_function) {
+
+  // when the function has no leading hint instruction, the entry slot is reserved for
+  // our bti: relocate the original first instruction so it executes from the
+  // compensation in its original program order.
+  if (bti_at_entry && bti_slot) {
+    llvm::MCInst inst;
+    uint64_t inst_size = 0;
+    if (!disassembler->GetInstruction(func_addr, 0, inst, inst_size) ||
+        inst_size != 4)
+      return Error("Cannot relocate entry instruction for bti slot");
+    Error error = target_->RewriteInstruction(inst, *codegen, func_addr, 0,
+                                              reached_end_of_function);
+    if (error.Fail()) return error;
+  }
+
+  while (offset - skip_bytes < rewrite_size && !reached_end_of_function) {
     llvm::MCInst inst;
     uint64_t inst_size = 0;
     if (!disassembler->GetInstruction(func_addr, offset, inst, inst_size))
@@ -273,10 +318,30 @@ Error InterceptorImpl::RewriteInstructions(
     offset += inst_size;
   }
 
-  if (offset < rewrite_size)
+  if (offset - skip_bytes < rewrite_size)
     return Error(
         "End of function reached after %zd byte when rewriting %zd bytes",
         offset, rewrite_size);
+
+  // relocate one more instruction into the compensation and turn its now-free slot
+  // at the tail of the jumper into a bti landing pad. The trampoline's indirect
+  // jump-back targets this slot; sequential execution treats it as a no-op so the
+  // program is unaffected. Without this the jump-back faults with SIGILL on
+  // BTI-protected pages (Android 15 system libraries).
+  if (bti_slot && !bti_at_entry && !reached_end_of_function) {
+    llvm::MCInst inst;
+    uint64_t inst_size = 0;
+    if (disassembler->GetInstruction(func_addr, offset, inst, inst_size)) {
+      Error rewrite_error = target_->RewriteInstruction(
+          inst, *codegen, func_addr, offset, reached_end_of_function);
+      if (!rewrite_error.Fail()) {
+        *bti_slot = static_cast<uint8_t *>(old_function) + offset;
+        offset += inst_size;
+      }
+    }
+  } else if (bti_slot && bti_at_entry) {
+    *bti_slot = old_function;
+  }
 
   uint8_t *target_addr = static_cast<uint8_t *>(old_function) + offset;
   TrampolineConfig full_config = target_->GetFullTrampolineConfig();
@@ -289,9 +354,13 @@ Error InterceptorImpl::RewriteInstructions(
 
 Error InterceptorImpl::CreateCompensationFunction(void *old_function,
                                                   size_t rewrite_size,
-                                                  void **callback_function) {
+                                                  void **callback_function,
+                                                  size_t skip_bytes,
+                                                  void **bti_slot,
+                                                  bool bti_at_entry) {
   std::unique_ptr<CodeGenerator> codegen;
-  Error error = RewriteInstructions(old_function, rewrite_size, codegen);
+  Error error = RewriteInstructions(old_function, rewrite_size, codegen,
+                                    skip_bytes, bti_slot, bti_at_entry);
   if (error.Fail()) return error;
 
   size_t code_size = codegen->LayoutCode();
@@ -320,10 +389,16 @@ Error InterceptorImpl::InterceptFunction(void *old_function, void *new_function,
     // We don't have to set up a callback function so installing a trampoline
     // without generating compensation instructions is sufficient.
     TrampolineConfig full_config = target_->GetFullTrampolineConfig();
-    return InstallTrampoline(full_config, old_function, new_function);
+    return InstallTrampoline(full_config, old_function, new_function,
+                             GetLeadingHintSkip(old_function));
   }
 
   uintptr_t old_address = reinterpret_cast<uintptr_t>(old_function);
+  size_t hint_skip = GetLeadingHintSkip(old_function);
+  // functions without a leading hint instruction (PAC-less leaf functions) still need
+  // a bti at the entry for their indirect callers - reserve the first slot for it.
+  bool bti_at_entry = (hint_skip == 0);
+  if (bti_at_entry) hint_skip = 4;
 
   size_t aligned_full_trampoline_size = 0;
   TrampolineConfig full_config = target_->GetFullTrampolineConfig();
@@ -340,11 +415,14 @@ Error InterceptorImpl::InterceptFunction(void *old_function, void *new_function,
                                 trampoline_size);
       if (error.Fail()) return error;
 
+      void *bti_slot = nullptr;
       error = CreateCompensationFunction(old_function, trampoline_size,
-                                         callback_function);
+                                         callback_function, hint_skip,
+                                         &bti_slot, bti_at_entry);
       if (error.Fail()) return error;
 
-      return InstallTrampoline(config, old_function, new_function);
+      return InstallTrampoline(config, old_function, new_function, hint_skip,
+                               bti_slot);
     } else {
       void *intermediate_trampoline = executable_memory_->Allocate(
           aligned_full_trampoline_size, target_->GetCodeAlignment(),
@@ -356,15 +434,18 @@ Error InterceptorImpl::InterceptFunction(void *old_function, void *new_function,
                                 trampoline_size);
       if (error.Fail()) return error;
 
+      void *bti_slot = nullptr;
       error = CreateCompensationFunction(old_function, trampoline_size,
-                                         callback_function);
+                                         callback_function, hint_skip,
+                                         &bti_slot, bti_at_entry);
       if (error.Fail()) return error;
 
       error =
           InstallTrampoline(full_config, intermediate_trampoline, new_function);
       if (error.Fail()) return error;
 
-      return InstallTrampoline(config, old_function, intermediate_trampoline);
+      return InstallTrampoline(config, old_function, intermediate_trampoline,
+                               hint_skip, bti_slot);
     }
   }
   return Error("Failed to find a suitable trampoline");

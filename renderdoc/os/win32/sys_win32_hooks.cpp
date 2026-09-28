@@ -73,6 +73,9 @@ typedef BOOL(WINAPI *PFN_CREATE_PROCESS_WITH_LOGON_W)(LPCWSTR lpUsername, LPCWST
                                                       LPPROCESS_INFORMATION lpProcessInformation);
 
 typedef BOOL(WINAPI *PFN_SHELLEXECUTE_EXW)(SHELLEXECUTEINFOW *pExecInfo);
+typedef HINSTANCE(WINAPI *PFN_SHELLEXECUTE_W)(HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpFile,
+                                             LPCWSTR lpParameters, LPCWSTR lpDirectory,
+                                             INT nShowCmd);
 
 RDOC_CONFIG(bool, Driver_NTEEarlyChildCapture, false,
             "Launch the NTE game child suspended from its launcher for ordinary capture, and "
@@ -116,6 +119,8 @@ public:
     // launchers commonly spawn a requireAdministrator child through ShellExecuteEx instead of
     // CreateProcess, which would bypass every hook above and lose the child process
     ShellExecuteExW.Register("shell32.dll", "ShellExecuteExW", ShellExecuteExW_hook);
+    if(Driver_NTEEarlyChildCapture())
+      ShellExecuteW.Register("shell32.dll", "ShellExecuteW", ShellExecuteW_hook);
 
     // handle API set exports if they exist. These don't really exist so we don't have to worry
     // about double hooking, and also they call into the 'real' implementation in kernelbase.dll
@@ -184,6 +189,7 @@ private:
   HookedFunction<PFN_CREATE_PROCESS_WITH_LOGON_W> CreateProcessWithLogonW;
 
   HookedFunction<PFN_SHELLEXECUTE_EXW> ShellExecuteExW;
+  HookedFunction<PFN_SHELLEXECUTE_W> ShellExecuteW;
 
   HookedFunction<PFN_WSASTARTUP> WSAStartup;
   HookedFunction<PFN_WSACLEANUP> WSACleanup;
@@ -608,6 +614,21 @@ private:
         },
         dwCreationFlags, ShouldInject(lpApplicationName, lpCommandLine), lpEnvironment,
         lpProcessInformation);
+  }
+
+  static HINSTANCE WINAPI ShellExecuteW_hook(HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpFile,
+                                              LPCWSTR lpParameters, LPCWSTR lpDirectory,
+                                              INT nShowCmd)
+  {
+    if(lpFile)
+    {
+      const wchar_t *filename = wcsrchr(lpFile, L'\\');
+      filename = filename ? filename + 1 : lpFile;
+      if(_wcsicmp(filename, L"HTGame.exe") == 0 || _wcsicmp(filename, L"NTEGame.exe") == 0)
+        RDCLOG("NTE ShellExecuteW observed: %ls", filename);
+    }
+
+    return syshooks.ShellExecuteW()(hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd);
   }
 
   static BOOL WINAPI ShellExecuteExW_hook(SHELLEXECUTEINFOW *pExecInfo)

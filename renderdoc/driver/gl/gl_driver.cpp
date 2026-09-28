@@ -2066,6 +2066,8 @@ void WrappedOpenGL::SwapBuffers(WindowingSystem winSystem, void *windowHandle)
   if(m_ActiveContexts[Threading::GetCurrentID()].ctx == NULL)
   {
     m_NoCtxFrames++;
+    if(m_NoCtxFrames == 1)
+      RDCLOG("PROBE SwapBuffers no-context on tid {0}", Threading::GetCurrentID());
     if(m_NoCtxFrames == 100)
     {
       RDCERR(

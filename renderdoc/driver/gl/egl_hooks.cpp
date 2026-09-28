@@ -33,6 +33,12 @@ RDOC_CONFIG(bool, Android_AllowAllEGLExtensions, false,
             "compatibility, but with this option that behaviour can be overridden and all "
             "extensions will be reported.");
 
+#if ENABLED(RDOC_ANDROID)
+// android_hook.cpp: inline hooks the vendor driver's swap entry points once the driver is
+// mapped (applications can bind straight to the vendor driver and skip libEGL entirely).
+void Android_HookVendorSwap();
+#endif
+
 #if ENABLED(RDOC_POSIX)
 #include <dlfcn.h>
 
@@ -197,7 +203,26 @@ HOOK_EXPORT EGLDisplay EGLAPIENTRY eglGetDisplay_renderdoc_hooked(EGLNativeDispl
 
 #endif
 
-  return EGL.GetDisplay(display);
+  EGLDisplay ret;
+
+  {
+    // the first eglGetDisplay initialises the driver dispatch inside libEGL. Its internal dlsym()
+    // calls must resolve real pointers, otherwise our wrappers can end up stored in libEGL's own
+    // dispatch table and recurse infinitely when we call onwards through EGL.*.
+    ScopedSuppressHooking suppress;
+    ret = EGL.GetDisplay(display);
+  }
+
+  // pick up any libraries loaded during driver initialisation (vendor EGL/GLES drivers) that
+  // weren't loaded when our hooks were installed. Also inline hook the vendor driver's swap
+  // entry points now that it's mapped - applications can bind straight to the vendor driver
+  // and never call the system libEGL swap (seen on NTE/UE + Adreno).
+  LibraryHooks::Refresh();
+#if ENABLED(RDOC_ANDROID)
+  Android_HookVendorSwap();
+#endif
+
+  return ret;
 }
 
 HOOK_EXPORT EGLDisplay EGLAPIENTRY eglGetPlatformDisplay_renderdoc_hooked(EGLenum platform,
@@ -223,7 +248,18 @@ HOOK_EXPORT EGLDisplay EGLAPIENTRY eglGetPlatformDisplay_renderdoc_hooked(EGLenu
     RDCWARN("Unknown platform %x in eglGetPlatformDisplay", platform);
 #endif
 
-  return EGL.GetPlatformDisplay(platform, native_display, attrib_list);
+  EGLDisplay ret;
+
+  {
+    // as in eglGetDisplay, the driver dispatch inside libEGL may be initialised here and must
+    // resolve real pointers, and any libraries loaded now need a hook rescan.
+    ScopedSuppressHooking suppress;
+    ret = EGL.GetPlatformDisplay(platform, native_display, attrib_list);
+  }
+
+  LibraryHooks::Refresh();
+
+  return ret;
 }
 
 HOOK_EXPORT EGLBoolean EGLAPIENTRY eglBindAPI_renderdoc_hooked(EGLenum api)
@@ -534,6 +570,11 @@ HOOK_EXPORT EGLBoolean EGLAPIENTRY eglMakeCurrent_renderdoc_hooked(EGLDisplay di
 
 HOOK_EXPORT EGLBoolean EGLAPIENTRY eglSwapBuffers_renderdoc_hooked(EGLDisplay dpy, EGLSurface surface)
 {
+  {
+    static std::atomic<int> probeFirst{0};
+    if(probeFirst++ == 0)
+      RDCLOG("PROBE eglSwapBuffers FIRST ENTRY dpy=%p surf=%p", dpy, surface);
+  }
   if(RenderDoc::Inst().IsReplayApp())
   {
     if(!EGL.SwapBuffers)
@@ -1104,6 +1145,15 @@ void EGLHook::RegisterHooks()
   LibraryHooks::RegisterLibraryHook("libGLESv2" LIBSUFFIX, NULL);
   LibraryHooks::RegisterLibraryHook("libGLESv1_CM" LIBSUFFIX, NULL);
 
+#if ENABLED(RDOC_ANDROID)
+  // vendor GLES drivers: some applications (seen in NTE/UE + Adreno on Android 15) resolve
+  // their EGL entry points straight from the vendor driver via eglGetProcAddress and call it
+  // directly, never touching the system libEGL.so. Registering the vendor EGL library makes
+  // the hooking pass dlopen() it at init time and inline hook its swap entry points too.
+  // The intercept_dlopen /vendor/ exemption keeps the system libEGL's own driver load intact.
+  LibraryHooks::RegisterLibraryHook("libEGL_adreno" LIBSUFFIX, NULL);
+#endif
+
 #if ENABLED(RDOC_WIN32)
   // on windows, we want to ignore any GLES libraries to ensure we capture the GLES calls, not the
   // underlying GL calls
@@ -1156,6 +1206,7 @@ HOOK_EXPORT void AndroidGLESLayer_Initialize(void *layer_id,
 HOOK_EXPORT void *AndroidGLESLayer_GetProcAddress(const char *funcName,
                                                   __eglMustCastToProperFunctionPointerType next)
 {
+  RDCLOG("GLESLayerGPA(%s)", funcName ? funcName : "(null)");
 // return our egl hooks
 #define GPA_FUNCTION(name, isext, replayrequired) \
   if(!strcmp(funcName, "egl" STRINGIZE(name)))    \

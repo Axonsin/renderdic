@@ -166,6 +166,15 @@ static void MakeSubpassLoadRP(RPCreateInfo &info, const RPCreateInfo *origInfo, 
   {                                                                                      \
     if(obj == VK_NULL_HANDLE)                                                            \
       return;                                                                            \
+    /* NTE: in-process modules (frame estimation etc.) can destroy resources that were    \
+     * created before our layer chained in, arriving as raw driver handles. Skip all      \
+     * bookkeeping for anything we don't recognise and pass the destroy straight down. */ \
+    if(GetRecord(obj) == NULL)                                                           \
+    {                                                                                    \
+      /* obj is already a raw driver handle */                                           \
+      ObjDisp(device)->func(Unwrap(device), obj, NULL);                                  \
+      return;                                                                            \
+    }                                                                                    \
     type unwrappedObj = Unwrap(obj);                                                     \
     if(IsReplayMode(m_State))                                                            \
       m_CreationInfo.erase(GetResID(obj));                                               \

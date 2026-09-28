@@ -121,3 +121,7 @@ struct EGLDispatchTable
 };
 
 extern EGLDispatchTable EGL;
+
+// android: address of the EGL.SwapBuffers slot, for the vendor-driver swap hooking in
+// android_hook.cpp.
+void **Android_GetEGLSwapOrigSlot();
