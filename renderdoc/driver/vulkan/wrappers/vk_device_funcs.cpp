@@ -33,6 +33,10 @@
 #include "driver/ihv/nv/nv_aftermath.h"
 #include "strings/string_utils.h"
 
+#if ENABLED(RDOC_ANDROID)
+#include <dlfcn.h>
+#endif
+
 RDOC_CONFIG(
     bool, Vulkan_Debug_ReplaceAppInfo, true,
     "By default we have no choice but to replace VkApplicationInfo to safely work on all drivers. "
@@ -930,6 +934,10 @@ VkResult WrappedVulkan::vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo
   else
   {
     RenderDoc::Inst().AddDeviceFrameCapturer(LayerDisp(m_Instance), this);
+
+    // multi-target fan-out set: registered here rather than in the constructor so our own forced
+    // instance (which never renders and is never destroyed) is left out of the batch
+    RenderDoc::Inst().AddVulkanFrameCapturer(this);
   }
 
   m_DbgReportCallback = VK_NULL_HANDLE;
@@ -5440,6 +5448,16 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
 
   FirstFrame();
 
+  /* NTE diagnostics: which module created a device, and what handle the app sees for it. */
+  {
+    Dl_info di = {};
+    dladdr(__builtin_return_address(0), &di);
+    RDCLOG("DEVICELOG: created device wrapper=%p real=%p caller=%s",
+           (void *)(pDevice ? *pDevice : NULL),
+           (void *)((*pDevice != VK_NULL_HANDLE) ? Unwrap(*pDevice) : VK_NULL_HANDLE),
+           (di.dli_fname && di.dli_fname[0]) ? di.dli_fname : "<unknown>");
+  }
+
   return ret;
 }
 
@@ -5447,6 +5465,15 @@ void WrappedVulkan::vkDestroyDevice(VkDevice device, const VkAllocationCallbacks
 {
   if(device == VK_NULL_HANDLE)
     return;
+
+  /* NTE diagnostics: device teardown (suspected source of the stale handles modules keep). */
+  {
+    Dl_info di = {};
+    dladdr(__builtin_return_address(0), &di);
+    RDCLOG("DEVICELOG: destroy device=%p real=%p caller=%s", (void *)device,
+           (void *)Unwrap(device),
+           (di.dli_fname && di.dli_fname[0]) ? di.dli_fname : "<unknown>");
+  }
 
   if(m_MemoryFreeThread)
   {

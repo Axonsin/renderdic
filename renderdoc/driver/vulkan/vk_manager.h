@@ -371,6 +371,20 @@ public:
   template <typename realtype>
   void ReleaseWrappedResource(realtype obj, bool clearID = false)
   {
+    // foreign-handle guard, first thing in the function. Every instance in the process is layered,
+    // so a module that created a resource before our layer chained in can still destroy it later
+    // through one of our entry points. Everything below dereferences obj as one of our wrappers
+    // (GetResID -> GetWrapped(obj)->id, GetRecord -> ->record, ...->Delete(this)) and would corrupt
+    // memory if it isn't, so bail out before any of it runs. TryIdentifyTypeByPtr only compares
+    // pool address ranges and never dereferences. The NULL handle is left to the original path.
+    void *wrapped = (void *)GetWrapped(obj);
+    if(wrapped != NULL && !IsWrappedHandleStrict((WrappedVkRes *)wrapped))
+    {
+      RDCERR("ReleaseWrappedResource: %p (wrapped %p) is not one of our wrapped objects - skipping",
+             (void *)obj, wrapped);
+      return;
+    }
+
     ResourceId id = GetResID(obj);
 
     RemoveAnnotations(id);

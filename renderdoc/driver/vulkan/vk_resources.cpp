@@ -158,6 +158,77 @@ VkResourceType TryIdentifyTypeByPtr(WrappedVkRes *ptr)
   return eResUnknown;
 }
 
+
+// Strict form of IsWrappedHandle: requires the pointer to be an exact item of the pool for some
+// type, not merely inside one of the arenas. See IS_OUR_WRAPPER in vk_resources.h.
+bool IsWrappedHandleStrict(WrappedVkRes *ptr)
+{
+  if(WrappedVkPhysicalDevice::IsMember(ptr))
+    return true;
+  if(WrappedVkInstance::IsMember(ptr))
+    return true;
+  if(WrappedVkDevice::IsMember(ptr))
+    return true;
+  if(WrappedVkQueue::IsMember(ptr))
+    return true;
+  if(WrappedVkDeviceMemory::IsMember(ptr))
+    return true;
+  if(WrappedVkBuffer::IsMember(ptr))
+    return true;
+  if(WrappedVkBufferView::IsMember(ptr))
+    return true;
+  if(WrappedVkImage::IsMember(ptr))
+    return true;
+  if(WrappedVkImageView::IsMember(ptr))
+    return true;
+  if(WrappedVkFramebuffer::IsMember(ptr))
+    return true;
+  if(WrappedVkRenderPass::IsMember(ptr))
+    return true;
+  if(WrappedVkShaderModule::IsMember(ptr))
+    return true;
+  if(WrappedVkPipelineCache::IsMember(ptr))
+    return true;
+  if(WrappedVkPipelineLayout::IsMember(ptr))
+    return true;
+  if(WrappedVkPipeline::IsMember(ptr))
+    return true;
+  if(WrappedVkSampler::IsMember(ptr))
+    return true;
+  if(WrappedVkDescriptorPool::IsMember(ptr))
+    return true;
+  if(WrappedVkDescriptorSetLayout::IsMember(ptr))
+    return true;
+  if(WrappedVkDescriptorSet::IsMember(ptr))
+    return true;
+  if(WrappedVkCommandPool::IsMember(ptr))
+    return true;
+  if(WrappedVkCommandBuffer::IsMember(ptr))
+    return true;
+  if(WrappedVkFence::IsMember(ptr))
+    return true;
+  if(WrappedVkEvent::IsMember(ptr))
+    return true;
+  if(WrappedVkQueryPool::IsMember(ptr))
+    return true;
+  if(WrappedVkSemaphore::IsMember(ptr))
+    return true;
+  if(WrappedVkSwapchainKHR::IsMember(ptr))
+    return true;
+  if(WrappedVkSurfaceKHR::IsMember(ptr))
+    return true;
+  if(WrappedVkDescriptorUpdateTemplate::IsMember(ptr))
+    return true;
+  if(WrappedVkSamplerYcbcrConversion::IsMember(ptr))
+    return true;
+  if(WrappedVkAccelerationStructureKHR::IsMember(ptr))
+    return true;
+  if(WrappedVkShaderEXT::IsMember(ptr))
+    return true;
+
+  return false;
+}
+
 VkResourceType IdentifyTypeByPtr(WrappedVkRes *ptr)
 {
   VkResourceType ret = TryIdentifyTypeByPtr(ptr);

@@ -72,6 +72,25 @@ extern "C" const rdcstr VulkanLayerJSONBasename;
 
 #if ENABLED(RDOC_ANDROID)
 #include <dlfcn.h>
+#include <sys/system_properties.h>
+
+// debug.rdoc.injectfrom=N injects the layer from the Nth non-internal vkCreateInstance onwards
+// (1 = every instance, the default). The engine's first instance is a short-lived capability probe:
+// its device is created and destroyed within the same millisecond. Modules that took state from
+// that probe keep using the dead device afterwards and take the driver down. Skipping the probe
+// leaves the layer on the renderer without touching the probe's lifecycle.
+static int32_t GetInjectFromInstance()
+{
+  char value[PROP_VALUE_MAX] = {};
+  if(__system_property_get("debug.rdoc.injectfrom", value) > 0)
+  {
+    int32_t parsed = atoi(value);
+    if(parsed > 0)
+      return parsed;
+  }
+
+  return 1;
+}
 
 void KeepLayerAlive()
 {
@@ -255,24 +274,88 @@ static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
     const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
     VkInstance *pInstance)
 {
-  // inject exactly once: the process can host several VK instances (render core + auxiliary
-  // modules like the frame-estimation layer). Chaining both into the single global layer
-  // state mixes wrapped handles from independent instances and crashes. Auxiliary instances
-  // are created unlayered and stay self-consistent.
-  static bool injected = false;
+  // every instance that renders must chain us in. The first vkCreateInstance the process makes is
+  // usually a short-lived capability probe (create instance -> enumerate devices -> destroy, never
+  // creating a device or swapchain), so injecting on that one and then gating on it leaves the real
+  // renderer unlayered: nothing renders through us and no present ever reaches us.
+  //
+  // Instead we inject into a bounded number of instances, and log every create - including the ones
+  // we skip and where they came from - so the log alone identifies which creates reach this hook.
+  // The bound matters: auxiliary modules (MFRC, frame-estimation) can self-create instances later
+  // in the process lifetime and chaining all of them into the single global layer state mixes
+  // wrapped handles from independent instances.
+  const int32_t kMaxInjectedInstances = 3;
 
-  if(injected || RenderDoc::Inst().IsReplayApp())
+  const char *appName = (pCreateInfo && pCreateInfo->pApplicationInfo &&
+                         pCreateInfo->pApplicationInfo->pApplicationName)
+                            ? pCreateInfo->pApplicationInfo->pApplicationName
+                            : "<null>";
+  const char *engineName = (pCreateInfo && pCreateInfo->pApplicationInfo &&
+                            pCreateInfo->pApplicationInfo->pEngineName)
+                               ? pCreateInfo->pApplicationInfo->pEngineName
+                               : "<null>";
+  const unsigned long long tid = (unsigned long long)Threading::GetCurrentID();
+
+  // who called us: libUnreal.so / libhwui.so resolve vkCreateInstance by name at runtime (they have
+  // no PLT slot for it), so this field is what tells us whether a given create reaches this hook.
+  // dlfcn.h is included above under ENABLED(RDOC_ANDROID).
+  Dl_info callerInfo = {};
+  dladdr(__builtin_return_address(0), &callerInfo);
+  const char *callerName =
+      (callerInfo.dli_fname && callerInfo.dli_fname[0]) ? callerInfo.dli_fname : "<unknown>";
+
+  if(RenderDoc::Inst().IsReplayApp())
+  {
+    RDCLOG("VKINJECT: skip (replay app) app='%s' engine='%s' tid=%llu caller=%s", appName,
+           engineName, tid, callerName);
     return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+  }
 
-  injected = true;
+  // never chain in our own refcount-pinning instance (KeepLayerAlive above): it never renders and is
+  // leaked for the process lifetime. Same predicate as internalInstance in
+  // wrappers/vk_device_funcs.cpp:583
+  const bool internalInstance =
+      (pCreateInfo && pCreateInfo->pApplicationInfo && pCreateInfo->pApplicationInfo->pApplicationName &&
+       rdcstr(pCreateInfo->pApplicationInfo->pApplicationName) == RDOC_PRODUCT_NAME " forced instance");
+  if(internalInstance)
+  {
+    RDCLOG("VKINJECT: skip (our forced instance) app='%s' tid=%llu caller=%s", appName, tid,
+           callerName);
+    return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+  }
 
-  RDCLOG("vkCreateInstance intercepted - injecting " RENDERDOC_VULKAN_LAYER_NAME);
+  // sequence this create among the app's instances (our forced instance and replay apps never get
+  // here), so debug.rdoc.injectfrom can leave the early probe unlayered. The counter is incremented
+  // with a builtin whose return value is defined as the pre-increment value, rather than relying on
+  // this fork's Atomic::Inc32 convention.
+  static int32_t s_instanceCounter = 0;
+  const int32_t instanceIndex = __atomic_fetch_add(&s_instanceCounter, 1, __ATOMIC_RELAXED);
+  const int32_t injectFrom = GetInjectFromInstance();
+  if(instanceIndex < injectFrom - 1)
+  {
+    RDCLOG("VKINJECT: skip (index %d < injectfrom-1 %d) app='%s' engine='%s' tid=%llu caller=%s",
+           (int)instanceIndex, (int)(injectFrom - 1), appName, engineName, tid, callerName);
+    return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+  }
+
+  // cap how many later instances we chain into: auxiliary modules can self-create instances with
+  // their own device state, and chaining all of them into the single global layer state mixes
+  // wrapped handles from independent instances.
+  if(instanceIndex >= injectFrom - 1 + kMaxInjectedInstances)
+  {
+    RDCLOG("VKINJECT: skip (cap %d reached at index %d) app='%s' engine='%s' tid=%llu caller=%s",
+           kMaxInjectedInstances, (int)instanceIndex, appName, engineName, tid, callerName);
+    return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+  }
 
   VkInstanceCreateInfo info = *pCreateInfo;
   const char *layerName = RENDERDOC_VULKAN_LAYER_NAME;
 
   rdcarray<const char *> layers;
   bool present = false;
+  // the app's own layer list is logged, not used as a skip condition: the renderer itself requests
+  // vendor layers on this platform, so skipping on their presence would drop the instance we need.
+  rdcstr layerList;
   if(info.enabledLayerCount && info.ppEnabledLayerNames)
   {
     layers.resize(info.enabledLayerCount);
@@ -280,6 +363,13 @@ static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
     {
       layers[i] = info.ppEnabledLayerNames[i];
       present |= !strcmp(layers[i], layerName);
+
+      if(i < 8)
+      {
+        if(!layerList.empty())
+          layerList += ",";
+        layerList += layers[i] ? layers[i] : "<null>";
+      }
     }
   }
   if(!present)
@@ -289,8 +379,13 @@ static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
     info.ppEnabledLayerNames = &layers[0];
   }
 
+  RDCLOG("VKINJECT: %s %s app='%s' engine='%s' tid=%llu caller=%s layers='%s' pAppInfo=%p",
+         present ? "already enabled" : "injecting", layerName, appName, engineName, tid, callerName,
+         layerList.c_str(), (void *)(pCreateInfo ? pCreateInfo->pApplicationInfo : NULL));
+
   VkResult ret = real_vkCreateInstance(&info, pAllocator, pInstance);
-  RDCLOG("vkCreateInstance returned %d, instance %p", ret, pInstance ? *pInstance : NULL);
+  RDCLOG("VKINJECT: vkCreateInstance(app='%s') returned %d, instance %p", appName, ret,
+         pInstance ? *pInstance : NULL);
   return ret;
 }
 #endif

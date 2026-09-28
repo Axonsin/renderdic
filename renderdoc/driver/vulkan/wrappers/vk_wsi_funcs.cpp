@@ -973,6 +973,18 @@ VkResult WrappedVulkan::vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR 
 {
   AdvanceFrame();
 
+  // present probe: proves the layer is inside this instance's chain and sees its presents. m_Instance
+  // is the handle returned to the app, i.e. the same value the vkCreateInstance injection log prints;
+  // LayerDisp() is the loader dispatch table for it. Rate limited to the first 5 presents and then
+  // one every 600 frames (~10s at 60fps) to stay cheap.
+  if(m_FrameCounter <= 5 || (m_FrameCounter % 600) == 0)
+  {
+    RDCLOG("VKPRESENT: frame %u instance %p layerdisp %p q=%s swapchains %u state=%d tid=%llu",
+           m_FrameCounter, (void *)m_Instance, (void *)LayerDisp(m_Instance),
+           ToStr(GetResID(queue)).c_str(), pPresentInfo ? pPresentInfo->swapchainCount : 0,
+           (int)m_State, (unsigned long long)Threading::GetCurrentID());
+  }
+
   if(Vulkan_Debug_VerboseCommandRecording())
   {
     RDCLOG("vkQueuePresentKHR() to queue %s", ToStr(GetResID(queue)).c_str());
@@ -1489,6 +1501,18 @@ void WrappedVulkan::vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surfac
 {
   if(surface == VK_NULL_HANDLE)
     return;
+
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the destroy straight down to the driver - everything below dereferences surface as one of ours.
+  // The input window and frame capturer it would unregister were never registered either.
+  if(!IS_OUR_WRAPPER(VkSurfaceKHR, surface))
+  {
+    if(IsPlausibleDriverHandle((const void *)surface))
+      ObjDisp(instance)->DestroySurfaceKHR(Unwrap(instance), surface, NULL);
+    else
+      RDCWARN("DestroySurfaceKHR: dropping implausible handle %p", (void *)surface);
+    return;
+  }
 
   WrappedVkSurfaceKHR *wrapper = GetWrapped(surface);
 

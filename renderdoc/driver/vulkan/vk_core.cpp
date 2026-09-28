@@ -232,9 +232,11 @@ WrappedVulkan::WrappedVulkan()
     m_FrameCaptureRecord->Length = 0;
     m_FrameCaptureRecord->InternalResource = true;
 
-    // multi-target captures fan out over every Vulkan instance in the process, registered for
-    // the driver's whole lifetime so surface-less off-screen instances are covered too
-    RenderDoc::Inst().AddVulkanFrameCapturer(this);
+    // multi-target captures fan out over every Vulkan instance in the process. Registering happens
+    // in vkCreateInstance rather than here, because at this point we can't yet tell whether this is
+    // our own forced instance (KeepLayerAlive, vk_layer.cpp) - that one is leaked for the process
+    // lifetime and never renders, so leaving it in the set would make EndVulkanCapture wait for a
+    // capture that can never finish.
   }
   else
   {
@@ -3585,6 +3587,28 @@ void WrappedVulkan::Present(DeviceOwnedWindow devWnd)
 
   if(!activeWindow)
   {
+    // this return silently swallows the whole trigger path for this present, and the only externally
+    // visible sign is that no capture ever triggers. Rate limited probe, indexed by drop count (first
+    // 5, then one every 600) so a fight over the active window is visible in the log.
+    //
+    // if this fires for the rendering window, the active window was taken by someone else - the
+    // m_ActiveWindow selection is "first registrant wins" (core.cpp AddFrameCapturer) and there is
+    // one active window for the whole process, so an auxiliary instance registering a window first
+    // starves the renderer. The fix in that case is to pick the window explicitly rather than to
+    // relax the test: the present that arrives for a non-active registered window should call
+    // RenderDoc::Inst().SetActiveWindow(devWnd) (that is the "first window that actually presents
+    // wins" selection), or RegisterSurface here can call it once the surface is known. Do NOT widen
+    // the condition with MatchClosestWindow - it rewrites devWnd to the nearest registered window and
+    // returns true, i.e. it disables the filter for every registered window and lets any instance's
+    // present start or end the capture.
+    static int32_t droppedPresents = 0;
+    const int32_t dropped = Atomic::Inc32(&droppedPresents) - 1;
+    if(dropped < 5 || (dropped % 600) == 0)
+      RDCLOG("VKPRESENT: DROPPED frame %u - window %p is not the active window (instance %p state=%d "
+             "tid=%llu)",
+             m_FrameCounter, devWnd.windowHandle, (void *)m_Instance, (int)m_State,
+             (unsigned long long)Threading::GetCurrentID());
+
     // first present to *any* window, even inactive, terminates frame 0
     if(m_FirstFrameCapture && IsActiveCapturing(m_State))
     {

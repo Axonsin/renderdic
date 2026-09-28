@@ -2405,7 +2405,13 @@ void RenderDoc::AddFrameCapturer(DeviceOwnedWindow devWnd, IFrameCapturer *cap)
 
   // the first one we see becomes the default
   if(m_ActiveWindow == DeviceOwnedWindow())
+  {
     m_ActiveWindow = devWnd;
+
+    // the drivers drop every present to a window that isn't this one (WrappedVulkan::Present), so
+    // whichever registration takes it here is what a missing capture has to be attributed to
+    RDCLOG("Active window taken by %#p / %#p", m_ActiveWindow.device, m_ActiveWindow.windowHandle);
+  }
 }
 
 void RenderDoc::RemoveFrameCapturer(DeviceOwnedWindow devWnd)

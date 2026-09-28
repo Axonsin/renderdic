@@ -937,6 +937,15 @@ void WrappedVulkan::vkFreeMemory(VkDevice device, VkDeviceMemory memory, const V
   if(memory == VK_NULL_HANDLE)
     return;
 
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the free straight down to the driver - everything below dereferences memory as one of ours
+  // (wrapped->real, wrapped->record->hasBDA, wrapped->record->memMapState, ...).
+  if(!IS_OUR_WRAPPER(VkDeviceMemory, memory))
+  {
+    FORWARD_OR_DROP_FOREIGN(FreeMemory, device, memory);
+    return;
+  }
+
   // we just need to clean up after ourselves on replay
   WrappedVkNonDispRes *wrapped = (WrappedVkNonDispRes *)GetWrapped(memory);
 

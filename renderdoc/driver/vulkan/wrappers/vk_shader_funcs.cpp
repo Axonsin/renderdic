@@ -28,6 +28,10 @@
 #include "driver/ihv/nv/nv_aftermath.h"
 #include "driver/shaders/spirv/spirv_reflect.h"
 
+#if ENABLED(RDOC_ANDROID)
+#include <dlfcn.h>
+#endif
+
 RDOC_EXTERN_CONFIG(bool, Replay_Debug_SingleThreadedCompilation);
 
 RDOC_CONFIG(bool, Vulkan_Debug_UsePipelineCacheForReplay, true,
@@ -968,6 +972,22 @@ VkResult WrappedVulkan::vkCreateGraphicsPipelines(VkDevice device, VkPipelineCac
         continue;
 
       ResourceId id = GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), pPipelines[i]);
+
+      /* NTE diagnostics: the app-visible handle is our wrapper. Logging it next to the device makes
+       * it decidable from a log whether a later destroy passes our pointer or a raw driver handle,
+       * and which device the pipeline was created on. */
+      {
+        static int32_t s_gfxPipeLog = 0;
+        if(s_gfxPipeLog < 4000)
+        {
+          s_gfxPipeLog++;
+          Dl_info di = {};
+          dladdr(__builtin_return_address(0), &di);
+          RDCLOG("CREATELOG: GraphicsPipelines dev=%p handle=%p caller=%s", (void *)device,
+                 (void *)pPipelines[i],
+                 (di.dli_fname && di.dli_fname[0]) ? di.dli_fname : "<unknown>");
+        }
+      }
 
       if(IsCaptureMode(m_State))
       {

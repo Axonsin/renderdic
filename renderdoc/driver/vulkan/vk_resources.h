@@ -866,6 +866,47 @@ bool IsPostponableRes(const WrappedVkRes *ptr);
 VkResourceType TryIdentifyTypeByPtr(WrappedVkRes *ptr);
 VkResourceType IdentifyTypeByPtr(WrappedVkRes *ptr);
 
+// is this pointer one of the handles we allocated ourselves? TryIdentifyTypeByPtr only compares
+// the pointer against every wrapping pool's address range and never dereferences it, so this is
+// safe to call on an arbitrary handle - including one created by another module before our layer
+// chained in (see the destroy entry points in vk_misc_funcs.cpp / vk_wsi_funcs.cpp /
+// vk_resource_funcs.cpp, and VulkanResourceManager::ReleaseWrappedResource)
+static inline bool IsWrappedHandle(WrappedVkRes *p)
+{
+  return TryIdentifyTypeByPtr(p) != eResUnknown;
+}
+
+// same question but requiring an exact pool item, safe against stale handles that merely land in
+// one of our arenas. See IS_OUR_WRAPPER below for the per-type form.
+bool IsWrappedHandleStrict(WrappedVkRes *ptr);
+
+// Strict form of the same question for a known type: a live wrapper sits exactly on an item boundary
+// of the pool for that type, while a stale handle an in-process module kept across a device teardown
+// can land inside one of our arenas by chance and still pass the range test above. Acting on such a
+// pointer reads and frees memory that is not a wrapper. The destroy entry points guard with this
+// instead of IsWrappedHandle.
+#define IS_OUR_WRAPPER(type, obj) (CONCAT(Wrapped, type)::IsMember((const void *)(obj)))
+
+// Could this value be a handle at all? Driver handles are 8-byte aligned pointers well above the
+// 32-bit range; a truncated or overwritten field is neither. Forwarding a value that fails this test
+// is what takes the driver down.
+static inline bool IsPlausibleDriverHandle(const void *obj)
+{
+  const uintptr_t value = (uintptr_t)obj;
+  return (value & (uintptr_t)7) == 0 && value > (uintptr_t)0xffffffff;
+}
+
+// Hand a handle that is not one of our wrappers to the driver, but only when it could be a handle at
+// all - a raw handle created before our layer chained in must still be destroyed, garbage must not.
+#define FORWARD_OR_DROP_FOREIGN(func, device, obj)                     \
+  do                                                                   \
+  {                                                                    \
+    if(IsPlausibleDriverHandle((const void *)(obj)))                   \
+      ObjDisp(device)->func(Unwrap(device), (obj), NULL);              \
+    else                                                               \
+      RDCWARN(#func ": dropping implausible handle %p", (void *)(obj)); \
+  } while(0)
+
 #define UNKNOWN_PREV_IMG_LAYOUT ((VkImageLayout)0xffffffff)
 
 struct ImageRegionState

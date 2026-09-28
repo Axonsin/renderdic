@@ -27,6 +27,10 @@
 #include "../vk_replay.h"
 #include "core/settings.h"
 
+#if ENABLED(RDOC_ANDROID)
+#include <dlfcn.h>
+#endif
+
 RDOC_CONFIG(
     bool, Vulkan_Hack_DisableRPNormalisation, false,
     "Disable default behaviour to normalise renderpasses to be more consistent and debuggable.");
@@ -157,6 +161,14 @@ static void MakeSubpassLoadRP(RPCreateInfo &info, const RPCreateInfo *origInfo, 
   }
 }
 
+// A handle that arrives at one of our destroy entry points is ours only when it sits exactly on an
+// item boundary of the pool for its type (IS_OUR_WRAPPER, ../vk_resources.h). IsWrappedHandle only
+// compares arena address ranges, so a stale handle another in-process module kept across a device
+// teardown can land inside one of our arenas by chance - the bookkeeping below would then read and
+// free memory that is not a live wrapper and hand the driver a value computed from it. A handle that
+// is not ours goes to the driver through FORWARD_OR_DROP_FOREIGN, which drops values that cannot be
+// handles at all instead of taking the driver down with them.
+
 // note, for threading reasons we ensure to release the wrappers before
 // releasing the underlying object. Otherwise after releasing the vulkan object
 // that same handle could be returned by create on another thread, and we
@@ -166,13 +178,25 @@ static void MakeSubpassLoadRP(RPCreateInfo &info, const RPCreateInfo *origInfo, 
   {                                                                                      \
     if(obj == VK_NULL_HANDLE)                                                            \
       return;                                                                            \
-    /* NTE: in-process modules (frame estimation etc.) can destroy resources that were    \
-     * created before our layer chained in, arriving as raw driver handles. Skip all      \
-     * bookkeeping for anything we don't recognise and pass the destroy straight down. */ \
-    if(GetRecord(obj) == NULL)                                                           \
+    /* NTE diagnostics: log the first destroys with caller and handle identity, so a     \
+     * crash inside the driver can be told apart from a crash in our own translation. */  \
     {                                                                                    \
-      /* obj is already a raw driver handle */                                           \
-      ObjDisp(device)->func(Unwrap(device), obj, NULL);                                  \
+      static int32_t s_destroyLog = 0;                                                    \
+      if(s_destroyLog < 150)                                                              \
+      {                                                                                  \
+        s_destroyLog++;                                                                   \
+        Dl_info di = {};                                                                  \
+        dladdr(__builtin_return_address(0), &di);                                          \
+        RDCLOG("DESTROYLOG: " #func " dev=%p obj=%p member=%d caller=%s", (void *)device,  \
+               (void *)obj, (int)IS_OUR_WRAPPER(type, obj),                              \
+               (di.dli_fname && di.dli_fname[0]) ? di.dli_fname : "<unknown>");           \
+      }                                                                                   \
+    }                                                                                     \
+    if(!IS_OUR_WRAPPER(type, obj))                                                        \
+    {                                                                                    \
+      /* not a live wrapper of ours: either a raw handle created before our layer chained \
+       * in, or a stale value a module kept from a device that has since gone. */         \
+      FORWARD_OR_DROP_FOREIGN(func, device, obj);                                         \
       return;                                                                            \
     }                                                                                    \
     type unwrappedObj = Unwrap(obj);                                                     \
@@ -205,6 +229,14 @@ void WrappedVulkan::vkDestroyImageView(VkDevice device, VkImageView obj, const V
   if(obj == VK_NULL_HANDLE)
     return;
 
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
+  if(!IS_OUR_WRAPPER(VkImageView, obj))
+  {
+    FORWARD_OR_DROP_FOREIGN(DestroyImageView, device, obj);
+    return;
+  }
+
   // with descriptor buffers, extend the lifespan of image views to ensure descriptors don't falsely
   // alias
   if(DescriptorBuffers())
@@ -233,6 +265,15 @@ void WrappedVulkan::vkDestroySampler(VkDevice device, VkSampler obj, const VkAll
 {
   if(obj == VK_NULL_HANDLE)
     return;
+
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
+  if(!IS_OUR_WRAPPER(VkSampler, obj))
+  {
+    FORWARD_OR_DROP_FOREIGN(DestroySampler, device, obj);
+    return;
+  }
+
   VkSampler unwrappedObj = Unwrap(obj);
   {
     SCOPED_LOCK(m_ForcedReferencesLock);
@@ -249,6 +290,15 @@ void WrappedVulkan::vkDestroyAccelerationStructureKHR(VkDevice device, VkAcceler
 {
   if(obj == VK_NULL_HANDLE)
     return;
+
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
+  if(!IS_OUR_WRAPPER(VkAccelerationStructureKHR, obj))
+  {
+    FORWARD_OR_DROP_FOREIGN(DestroyAccelerationStructureKHR, device, obj);
+    return;
+  }
+
   VkAccelerationStructureKHR unwrappedObj = Unwrap(obj);
   {
     SCOPED_LOCK(m_ASLookupByAddrLock);
@@ -269,6 +319,15 @@ void WrappedVulkan::vkDestroyFramebuffer(VkDevice device, VkFramebuffer obj,
 {
   if(obj == VK_NULL_HANDLE)
     return;
+
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
+  if(!IS_OUR_WRAPPER(VkFramebuffer, obj))
+  {
+    FORWARD_OR_DROP_FOREIGN(DestroyFramebuffer, device, obj);
+    return;
+  }
+
   VkFramebuffer unwrappedObj = Unwrap(obj);
   if(IsReplayMode(m_State))
   {
@@ -291,6 +350,15 @@ void WrappedVulkan::vkDestroyRenderPass(VkDevice device, VkRenderPass obj,
 {
   if(obj == VK_NULL_HANDLE)
     return;
+
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
+  if(!IS_OUR_WRAPPER(VkRenderPass, obj))
+  {
+    FORWARD_OR_DROP_FOREIGN(DestroyRenderPass, device, obj);
+    return;
+  }
+
   VkRenderPass unwrappedObj = Unwrap(obj);
   if(IsReplayMode(m_State))
   {
@@ -312,6 +380,14 @@ void WrappedVulkan::vkDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAl
 {
   if(buffer == VK_NULL_HANDLE)
     return;
+
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the destroy straight down to the driver - everything below dereferences buffer as one of ours.
+  if(!IS_OUR_WRAPPER(VkBuffer, buffer))
+  {
+    FORWARD_OR_DROP_FOREIGN(DestroyBuffer, device, buffer);
+    return;
+  }
 
   // artificially extend the lifespan of buffer device address memory or buffers, to ensure their
   // opaque capture address isn't re-used before the capture completes
@@ -357,6 +433,15 @@ void WrappedVulkan::vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR obj,
 {
   if(obj == VK_NULL_HANDLE)
     return;
+
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
+  // Note this also skips the internal overlay objects, which only exist for swapchains we wrapped.
+  if(!IS_OUR_WRAPPER(VkSwapchainKHR, obj))
+  {
+    FORWARD_OR_DROP_FOREIGN(DestroySwapchainKHR, device, obj);
+    return;
+  }
 
   // release internal rendering objects we created for rendering the overlay
   {
@@ -439,6 +524,14 @@ void WrappedVulkan::vkDestroyImage(VkDevice device, VkImage obj, const VkAllocat
 {
   if(obj == VK_NULL_HANDLE)
     return;
+
+  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
+  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
+  if(!IS_OUR_WRAPPER(VkImage, obj))
+  {
+    FORWARD_OR_DROP_FOREIGN(DestroyImage, device, obj);
+    return;
+  }
 
   // with descriptor buffers, extend the lifespan of images to ensure descriptors don't falsely
   // alias
