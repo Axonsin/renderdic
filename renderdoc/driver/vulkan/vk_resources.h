@@ -880,6 +880,62 @@ static inline bool IsWrappedHandle(WrappedVkRes *p)
 // one of our arenas. See IS_OUR_WRAPPER below for the per-type form.
 bool IsWrappedHandleStrict(WrappedVkRes *ptr);
 
+// ---------------------------------------------------------------------------------------------
+// TODO(NTE-FRAMEGEN-STALE-HANDLE): the guards below hide a handle-ownership bug, they do not fix it.
+//
+// Symptom: a foreign module destroys Vulkan handles it kept across a device teardown, and some of
+// those stale values land inside our wrapper arenas. IsWrappedHandle (above) only compares address
+// ranges, so such a handle is treated as ours, we read and free memory that is not a live wrapper,
+// and the driver is handed a value computed from it - the process dies. Reproduced on NTE
+// (com.hottagames.yh.laohu, Adreno 830, Android 15) with the frame-generation module
+// libframeestimationVK.so.
+//
+// Evidence from that crash (logcat + tombstones, 2026-09-28):
+//   DESTROYLOG: DestroyPipeline dev=B40000763772A9F0 obj=B40000768768EFE8 member=0
+//               caller=libframeestimationVK.so
+//   DESTROYLOG: DestroyPipeline dev=B40000763772A9F0 obj=00000000CAF65C66 member=0
+//               caller=libframeestimationVK.so
+//   wrapped_pool.h(116) - Error - Resource being deleted through wrong pool - 0xB400007687656F08
+//   stack: vulkan.adreno.so::vkDestroyPipeline <- CFrameGenVK::DestroyResources+3664
+//          <- CFrameGenVK::Init+1920   (RHIThread)
+//   tombstone_14: SIGSEGV at 0xcaf65c72 (the truncated 0xCAF65C66 plus 12); earlier tombstone_10/11
+//   in WrappedVulkan::vkDestroyPipeline+32.
+// Note the two shapes: a plausible-looking stale pointer (8-byte aligned, high address) and a
+// truncated 32-bit value whose low bits still address a mapping.
+//
+// When it reproduces: with the layer attached to the app's real renderer, ~13s into the run, while
+// the frame-generation module initialises (CFrameGenVK::Init) and destroys resources that belong to
+// an earlier device/instance - i.e. it needs the module's init path plus handles that were stored
+// before our layer chained in (a device teardown followed by a module re-init). With the guards in
+// place the app survives indefinitely (verified 3+ minutes) and this crash has not recurred.
+//
+// The guards are not only load-bearing for that one crash - they fire in an ordinary run too. On the
+// same build, 14s after launch: DestroyPipeline 0x3E954D9, DestroyPipelineLayout 0xAFFFFFFFF,
+// DestroyDescriptorPool 0x5, DestroyDescriptorSetLayout 0x1BFFFFFFFF / 0x5 / 0x3100000009. None of
+// those can be a driver handle, so some module is destroying objects with values that are not
+// handles at all. Each drop then either leaks a real object (the handle really was the only copy) or
+// is harmless (the object was already destroyed and the field is stale) - the log cannot tell which
+// without the caller, which is what the DESTROYLOG probe records.
+//
+// What the guards do, and their cost: handles that are not ours are dropped (or forwarded only when
+// IsPlausibleDriverHandle accepts them) instead of being dereferenced, which trades the crash for a
+// leak - the objects behind the dropped handles are never released, and the foreign module still
+// believes it destroyed them. That is papering over wrong ownership, not fixing it.
+//
+// What a real fix looks like (either is more than a one-line change):
+//  1. Make membership mean "live wrapper of a known type", not "address inside an arena":
+//     ItemPool::IsMember only checks arena bounds plus item-boundary alignment, it never consults the
+//     free stack, and Release() only scrubs slots (memset 0xfe) under ENABLED(RDOC_DEVEL) - so a
+//     freed slot still passes. Add liveness (free-list/flag) checking, and/or scrub freed slots in
+//     every build so a stale handle cannot masquerade as a live object.
+//  2. Make ownership explicit: give WrappedVkRes a magic/type tag plus the owning device, and route
+//     destruction through the ResourceManager that owns the object instead of a global pool test.
+//     That answers the question every destroy entry point is really asking: "is this our object on
+//     the device making this call?", not "is this address in one of our arenas?".
+// To reproduce with full detail, uncomment the NTE-DIAG probes (DESTROYLOG in
+// wrappers/vk_misc_funcs.cpp, DEVICELOG / CREATELOG in wrappers/vk_device_funcs.cpp and
+// vk_shader_funcs.cpp - `grep -rn NTE-DIAG` lists them all) and rebuild.
+// ---------------------------------------------------------------------------------------------
 // Strict form of the same question for a known type: a live wrapper sits exactly on an item boundary
 // of the pool for that type, while a stale handle an in-process module kept across a device teardown
 // can land inside one of our arenas by chance and still pass the range test above. Acting on such a

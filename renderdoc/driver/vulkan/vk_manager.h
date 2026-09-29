@@ -377,6 +377,8 @@ public:
     // (GetResID -> GetWrapped(obj)->id, GetRecord -> ->record, ...->Delete(this)) and would corrupt
     // memory if it isn't, so bail out before any of it runs. TryIdentifyTypeByPtr only compares
     // pool address ranges and never dereferences. The NULL handle is left to the original path.
+    // See TODO(NTE-FRAMEGEN-STALE-HANDLE) in vk_resources.h: this guard trades a crash for a leak and
+    // the underlying ownership bug is still open.
     void *wrapped = (void *)GetWrapped(obj);
     if(wrapped != NULL && !IsWrappedHandleStrict((WrappedVkRes *)wrapped))
     {
