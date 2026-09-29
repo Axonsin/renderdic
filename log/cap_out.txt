@@ -1,0 +1,5 @@
+host: adb://HA29QMVJ
+connected to ident 38920
+capture triggered, waiting...
+  t=1s registering API
+CAPTURE TIMEOUT

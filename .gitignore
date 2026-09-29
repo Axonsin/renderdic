@@ -48,3 +48,10 @@ qrenderdoc/3rdparty/pyside
 .DS_Store
 plugins-*/
 __pycache__
+
+# local working artifacts (agent scratch, IDE metadata, stray build output)
+.idea/
+.zcode/
+.zcodeignore
+capture-control.obj
+captures/

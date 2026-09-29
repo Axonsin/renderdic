@@ -1,0 +1,71 @@
+
+  exception_handler.vcxproj -> D:\Projects\renderdoc\x64\Release\\exception_handler.lib
+  crash_generation_server.vcxproj -> D:\Projects\renderdoc\x64\Release\\crash_generation_server.lib
+  Intel.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_Intel.lib
+  common.vcxproj -> D:\Projects\renderdoc\x64\Release\\breakpad_common.lib
+  crash_generation_client.vcxproj -> D:\Projects\renderdoc\x64\Release\\crash_generation_client.lib
+  renderdocshim.vcxproj -> D:\Projects\renderdoc\x64\Release\renderdicshim64.dll
+  renderdoc_dxil.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_dxil.lib
+  ARM.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_ARM.lib
+  renderdoc_dxgi.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_dxgi.lib
+  renderdoc_spirv.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_spirv.lib
+  renderdocui_stub.vcxproj -> D:\Projects\renderdoc\x64\Release\renderdicui.exe
+  NV.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_NV.lib
+  Read Git commit: '20c4e0fa06e69b83c24fc18c74ed1e7e0ea2422c'
+  renderdoc_gl.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_gl.lib
+  renderdoc_dxbc.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_dxbc.lib
+  AMD.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_AMD.lib
+  renderdoc_version.vcxproj -> D:\Projects\renderdoc\x64\Release\version.lib
+  renderdoc_vulkan.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_vulkan.lib
+  renderdoc_d3d11.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_d3d11.lib
+  d3d12_hooks.cpp
+  renderdoc_d3d12.vcxproj -> D:\Projects\renderdoc\x64\Release\driver_d3d12.lib
+  Processing layer JSON file for RenderDic 1.45
+  win32_hook.cpp
+    正在创建库 D:\Projects\renderdoc\x64\Release\renderdic.lib 和对象 D:\Projects\renderdoc\x64\Release\renderdic.exp
+  正在生成代码
+d:\projects\renderdoc\renderdoc\driver\vulkan\wrappers\vk_wsi_funcs.cpp : fatal error C1001: 内部编译器错误。 [D:\Projects\renderdoc\renderdoc\renderdoc.vcxproj]
+  (编译器文件“D:\a\_work\1\s\src\vctools\Compiler\Utc\src\p2\main.cpp”，第 263 行)
+   要解决此问题，请尝试简化或更改上面所列位置附近的程序。
+  如果可以，请在此处提供重现步骤: https://developercommunity.visualstudio.com 
+  请选择 Visual C++
+  “帮助”菜单上的“技术支持”命令，或打开技术支持帮助文件来获得详细信息。
+    link!UtcBldRustDemangleWithBuffer()+0x144d89
+    link!UtcBldRustDemangleWithBuffer()+0x144d89
+    link!UtcBldRustDemangleWithBuffer()+0x12b8b
+    link!UtcBldRustDemangleWithBuffer()+0x128ff
+    link!UtcBldRustDemangleWithBuffer()+0x1c37e
+    link!UtcBldRustDemangleWithBuffer()+0x1c9f7
+    link!CloseTypeServerPDB()+0x20fe22
+    link!DllGetObjHandler()+0x6d6c
+    link!CloseTypeServerPDB()+0x78783
+    link!CloseTypeServerPDB()+0x78683
+  
+  
+    Version 14.50.35728.0
+  
+    ExceptionCode            = C0000005
+    ExceptionFlags           = 00000000
+    ExceptionAddress         = 00007FFA9F29DC55 (00007FFA9EBD0000) "D:\Program Files\Microsoft VisualStudio\VisualStudio 2026\VC\Tools\MSVC\14.50.35717\bin\HostX64\x64\c2.dll"
+    NumberParameters         = 00000002
+    ExceptionInformation[ 0] = 0
+    ExceptionInformation[ 1] = 1D335D10074
+  
+  CONTEXT:
+    Rax    = FFFFFFFF  R8     = FC
+    Rbx    = 1D335D10074  R9     = 196E45D7260
+    Rcx    = 3BFFFFFFC4  R10    = 196E45D7260
+    Rdx    = 80  R11    = 196E45D7278
+    Rsp    = 6C3FFFD020  R12    = 0
+    Rbp    = 6C3FFFD1E0  E13    = 6C3FFFD140
+    Rsi    = FFFFFFFF  R14    = 197B
+    Rdi    = 0  R15    = 19774D9046B
+    Rip    = 7FFA9F29DC55  EFlags = 10206
+    SegCs  = 33  SegDs  = 2B
+    SegSs  = 2B  SegEs  = 2B
+    SegFs  = 53  SegGs  = 2B
+    Dr0    = 0  Dr3    = 0
+    Dr1    = 0  Dr6    = 0
+    Dr2    = 0  Dr7    = 0
+  
+LINK : fatal error LNK1000: Internal error during IMAGE::BuildImage [D:\Projects\renderdoc\renderdoc\renderdoc.vcxproj]
