@@ -41,6 +41,10 @@
 #include "superluminal/superluminal.h"
 #include "crash_handler.h"
 
+#if ENABLED(RDOC_ANDROID)
+#include <sys/system_properties.h>
+#endif
+
 #include "api/replay/renderdoc_tostr.inl"
 
 #include "api/replay/pipestate.inl"
@@ -1237,6 +1241,40 @@ bool RenderDoc::ShowReplayUI()
 
 void RenderDoc::Tick()
 {
+#if ENABLED(RDOC_ANDROID)
+  // debug.rdoc.capturenow=<nonce>[:frames] is the no-socket trigger: the phone console sets it
+  // (through the module, with root) and the layer picks it up here - Tick() runs once per frame from
+  // WrappedVulkan::AdvanceFrame() while background capturing. __system_property_get is a read from
+  // the shared property area, so unlike Process::GetEnvVariable this does not spawn getprop.
+  // The value is a nonce rather than a flag because a changed value is all this side needs to see:
+  // nothing here has to write the property back. Setting it before the app launches captures the
+  // first frame, which is the intended "arm and launch" behaviour; the module clears it after a
+  // trigger and on arm/disarm so a stale value cannot fire again.
+  {
+    static rdcstr lastNonce;
+    char value[PROP_VALUE_MAX] = {};
+
+    if(__system_property_get("debug.rdoc.capturenow", value) > 0 && value[0] != '\0' &&
+       lastNonce != value)
+    {
+      rdcstr request = value;
+      uint32_t frames = 1;
+      int colon = request.find(':');
+
+      if(colon >= 0)
+      {
+        int parsed = atoi(request.substr(colon + 1).c_str());
+        if(parsed > 0)
+          frames = (uint32_t)parsed;
+      }
+
+      lastNonce = value;
+      RDCLOG("debug.rdoc.capturenow=%s - triggering %u frame(s) from a property", value, frames);
+      TriggerCapture(frames);
+    }
+  }
+#endif
+
   bool cur_focus = false;
   for(size_t i = 0; i < m_FocusKeys.size(); i++)
     cur_focus |= Keyboard::GetKeyState(m_FocusKeys[i]);
@@ -1522,6 +1560,27 @@ void RenderDoc::QueueCapture(uint32_t frameNumber)
   auto it = std::lower_bound(m_QueuedFrameCaptures.begin(), m_QueuedFrameCaptures.end(), frameNumber);
   if(it == m_QueuedFrameCaptures.end() || *it != frameNumber)
     m_QueuedFrameCaptures.insert(it - m_QueuedFrameCaptures.begin(), frameNumber);
+}
+
+uint32_t RenderDoc::GetOverlayBits()
+{
+#if ENABLED(RDOC_ANDROID)
+  // debug.rdoc.overlay=0/1 lets the phone console hide or show the on-screen overlay text ("Capturing
+  // Vulkan. ... Frame: N ...") without reaching into this process: the overlay bits have no target
+  // control packet, only the in-process app API. Read live so a toggle lands on the next present;
+  // any other value (unset, 2, garbage) leaves the in-process state alone.
+  char value[PROP_VALUE_MAX] = {};
+
+  if(__system_property_get("debug.rdoc.overlay", value) > 0)
+  {
+    if(value[0] == '0' && value[1] == '\0')
+      return m_Overlay & ~eRENDERDOC_Overlay_Enabled;
+    if(value[0] == '1' && value[1] == '\0')
+      return m_Overlay | eRENDERDOC_Overlay_Enabled;
+  }
+#endif
+
+  return m_Overlay;
 }
 
 bool RenderDoc::ShouldTriggerCapture(uint32_t frameNumber)
