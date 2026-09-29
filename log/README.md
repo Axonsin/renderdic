@@ -12,5 +12,5 @@ Build and test logs kept with the fork for reference. Nothing here is read by th
 | `cap_out.txt` | a `capture_nte.py` run against the Android target **before** the layer fix: target control connects and the trigger goes out, but no capture arrives — the state that led to the probe-instance / stale-handle diagnosis |
 
 The Android-side logs (RenderDoc internal log per run, device logcat) are pulled on demand into
-`%TEMP%\rdoc0\` and are not committed; the runbook in the KSU_renderdochider repo describes how to
+`%TEMP%\rdoc0\` and are not committed; the runbook in the rdc_parasite repo describes how to
 collect them. See that repo's `docs/RUNBOOK.md` for the capture recipe these logs came from.

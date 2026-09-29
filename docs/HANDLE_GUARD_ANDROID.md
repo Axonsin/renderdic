@@ -98,7 +98,7 @@ ValidationCache 扩展，后者只完成实现/编译检查。BDA buffer 的重�
 原发布 SO SHA256：
 `28348bfd2b092b51719f2d7dc4b55c0d34b397a9aa1a0e07663c431c7b613159`。
 
-本机原始证据和产物位于 `D:/Projects/KSU_renderdochider/local/handle_guard/`：
+本机原始证据和产物位于 `D:/Projects/rdc_parasite/local/handle_guard/`：
 `final.so`、`final.so.dbg`、`native_integration.log`、`native_lifecycle.log`、
 `native_benchmark.log`、`long_run.json`、`*_perf.json`、`inject*_frame*.rdc` 和验证输出。
 交付用标准名称位于该目录的 `delivery/libVkLayer_GLES_RenderDoc.so` 和 `.so.dbg`；
