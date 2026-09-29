@@ -671,6 +671,18 @@ if(ANDROID)
     # rename output library
     set_target_properties(renderdoc PROPERTIES OUTPUT_NAME "VkLayer_GLES_RenderDoc")
 
+    # Strip the layer for deployment. See the warning next to the STRIP_ANDROID_LIBRARY option in the
+    # top-level CMakeLists.txt before enabling it: a stripped library cannot symbolize an on-device
+    # crash, which is exactly when the symbols are needed.
+    #
+    # Order matters: the unstripped library is copied to <library>.so.dbg *before* the strip runs, so
+    # that copy is the full-symbol version of exactly this build - keep it next to the stripped .so.
+    # This is a POST_BUILD step on the library target, so it only re-runs when the library is
+    # re-linked: after changing the sources, delete the .so (and its stale .dbg) before building, or
+    # the strip and the .dbg silently keep describing the old binary.
+    # On NDK r16b there is no llvm-strip in the toolchain root, so ANDROID_STRIP_TOOL falls back to
+    # CMAKE_STRIP (aarch64-linux-android-strip). --strip-unneeded keeps the dynamic symbol table and
+    # the build-id note, so the library still loads and the .dbg still matches.
     if(STRIP_ANDROID_LIBRARY AND ANDROID_STRIP_TOOL AND RELEASE_MODE)
         add_custom_command(TARGET renderdoc POST_BUILD
             COMMAND echo Stripping $<TARGET_FILE:renderdoc>

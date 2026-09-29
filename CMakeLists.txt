@@ -68,7 +68,21 @@ if(BUILD_ANDROID)
         CACHE STRING
         "The Android toolchain file")
 
-    option(STRIP_ANDROID_LIBRARY "Strip the resulting android library" OFF)
+    # ------------------------------------------------------------------------------------------
+    # IMPORTANT - do NOT enable this in a build you intend to test or debug on a device.
+    #
+    # Stripping removes the DWARF debug info that an on-device tombstone / crash log is resolved
+    # with (addr2line, llvm-symbolizer, ndk-stack). The layer library is ~380MB unstripped, of which
+    # about 90% is .debug_*, and ~21MB stripped - so stripping is what a *deployment* build wants
+    # (smaller, faster to push and to load) and what a *testing* build must not have. The pre-strip
+    # copy is kept as <library>.so.dbg next to the stripped library (see renderdoc/CMakeLists.txt),
+    # but it is only useful if it is kept together with the .so it came from.
+    #
+    # Only has an effect with RELEASE_MODE (Release / RelWithDebInfo / MinSizeRel); a Debug build
+    # can never strip, so a plain debug build always keeps its symbols.
+    # ------------------------------------------------------------------------------------------
+    option(STRIP_ANDROID_LIBRARY
+        "Strip the resulting android library - deployment only, breaks on-device symbolication" OFF)
 
     # Set default API level to 21 if not configured explicitly
     if(NOT ANDROID_PLATFORM)

@@ -60,6 +60,18 @@ On windows cmake you need to specify the 'generator' type to the cmake invocatio
 cmake -DBUILD_ANDROID=On -DANDROID_ABI=armeabi-v7a -G "MSYS Makefiles" ..
 ```
 
+### Stripping the android library
+
+`STRIP_ANDROID_LIBRARY` (off by default, only effective in a release build) strips the layer library
+after it is linked. That is what a deployment build wants: the unstripped library is ~380MB, about 90%
+of which is debug info, while the stripped one is ~21MB and therefore much faster to push to a device
+and to load. The pre-strip copy is left next to it as `libVkLayer_GLES_RenderDoc.so.dbg`.
+
+**Do not enable it in a build you intend to test or debug on a device.** Without the debug info an
+on-device tombstone cannot be symbolized with addr2line / llvm-symbolizer / ndk-stack, which is the
+first thing needed to work out why the layer crashed. If you do deploy a stripped build, keep the
+`.so.dbg` from that same build next to the `.so`, so a crash can still be symbolized afterwards.
+
 ### Note:
 
 With GLES programs on Android, the built-in hooking method doesn't always work. If you have trouble with crashes or problems capturing GLES programs, try enabling building with [interceptor-lib](../../renderdoc/3rdparty/interceptor-lib/README.md). **WARNING**: Building this requires a hefty dependency.
