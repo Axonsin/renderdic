@@ -336,6 +336,9 @@ VkResult WrappedVulkan::vkCreatePipelineLayout(VkDevice device,
   {
     ResourceId id =
         GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), *pPipelineLayout);
+#if NTE_HANDLE_DIAGNOSTICS && ENABLED(RDOC_ANDROID)
+    NTECreateCaller(device, *pPipelineLayout, __builtin_return_address(0));
+#endif
 
     if(IsCaptureMode(m_State))
     {
@@ -974,6 +977,9 @@ VkResult WrappedVulkan::vkCreateGraphicsPipelines(VkDevice device, VkPipelineCac
         continue;
 
       ResourceId id = GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), pPipelines[i]);
+#if NTE_HANDLE_DIAGNOSTICS && ENABLED(RDOC_ANDROID)
+      NTECreateCaller(device, pPipelines[i], __builtin_return_address(0));
+#endif
 
       /* NTE-DIAG(2026-09-29): probe logging every created pipeline handle with its caller, commented
        * out - it fires on the hot creation path (capped at 4000 per process). Uncomment when a
@@ -1267,6 +1273,9 @@ VkResult WrappedVulkan::vkCreateComputePipelines(VkDevice device, VkPipelineCach
     for(uint32_t i = 0; i < count; i++)
     {
       ResourceId id = GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), pPipelines[i]);
+#if NTE_HANDLE_DIAGNOSTICS && ENABLED(RDOC_ANDROID)
+      NTECreateCaller(device, pPipelines[i], __builtin_return_address(0));
+#endif
 
       if(IsCaptureMode(m_State))
       {
@@ -1549,6 +1558,9 @@ VkResult WrappedVulkan::vkCreateRayTracingPipelinesKHR(
         continue;
 
       ResourceId id = GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), pPipelines[i]);
+#if NTE_HANDLE_DIAGNOSTICS && ENABLED(RDOC_ANDROID)
+      NTECreateCaller(device, pPipelines[i], __builtin_return_address(0));
+#endif
 
       if(IsCaptureMode(m_State))
       {

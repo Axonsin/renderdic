@@ -219,10 +219,8 @@ private:
     }
 
     bool IsAlloc(const void *p) const { return p >= &items[0] && p < &items[count]; }
-    // Strict version of IsAlloc: a live item is exactly on an item boundary of this arena. A stale
-    // pointer that merely lands inside the arena - a handle from a module that kept it across a
-    // device teardown, a recycled address - is not a member, which is what keeps our bookkeeping
-    // off memory that is not a wrapper.
+    // Range plus exact slot boundary only. A freed slot still matches, and an address reused
+    // for a different object can match too. This does not establish liveness or ownership.
     bool IsMember(const void *p) const
     {
       if(!IsAlloc(p))

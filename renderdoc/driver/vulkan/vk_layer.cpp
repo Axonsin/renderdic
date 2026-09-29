@@ -76,9 +76,9 @@ extern "C" const rdcstr VulkanLayerJSONBasename;
 
 // debug.rdoc.injectfrom=N injects the layer from the Nth non-internal vkCreateInstance onwards
 // (1 = every instance, the default). The engine's first instance is a short-lived capability probe:
-// its device is created and destroyed within the same millisecond. Modules that took state from
-// that probe keep using the dead device afterwards and take the driver down. Skipping the probe
-// leaves the layer on the renderer without touching the probe's lifecycle.
+// Skipping the probe leaves the layer on the renderer for controlled comparisons. The 2026-09-30
+// NTE audit reproduced the frame-generation failure with both settings: its uninitialized cleanup
+// fields are not evidence of a device retained from this probe (see vk_resources.h).
 static int32_t GetInjectFromInstance()
 {
   char value[PROP_VALUE_MAX] = {};

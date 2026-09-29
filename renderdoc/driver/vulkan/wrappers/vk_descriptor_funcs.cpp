@@ -1704,6 +1704,9 @@ VkResult WrappedVulkan::vkCreateDescriptorPool(VkDevice device,
   {
     ResourceId id =
         GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), *pDescriptorPool);
+#if NTE_HANDLE_DIAGNOSTICS && ENABLED(RDOC_ANDROID)
+    NTECreateCaller(device, *pDescriptorPool, __builtin_return_address(0));
+#endif
 
     if(IsCaptureMode(m_State))
     {
@@ -1860,6 +1863,9 @@ VkResult WrappedVulkan::vkCreateDescriptorSetLayout(VkDevice device,
   if(ret == VK_SUCCESS)
   {
     ResourceId id = GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), *pSetLayout);
+#if NTE_HANDLE_DIAGNOSTICS && ENABLED(RDOC_ANDROID)
+    NTECreateCaller(device, *pSetLayout, __builtin_return_address(0));
+#endif
 
     if(IsCaptureMode(m_State))
     {

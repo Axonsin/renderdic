@@ -876,76 +876,84 @@ static inline bool IsWrappedHandle(WrappedVkRes *p)
   return TryIdentifyTypeByPtr(p) != eResUnknown;
 }
 
-// same question but requiring an exact pool item, safe against stale handles that merely land in
-// one of our arenas. See IS_OUR_WRAPPER below for the per-type form.
+// Same question but requiring an exact pool slot. Does not check allocation state or owner.
+// See IS_OUR_WRAPPER below for the per-type form.
 bool IsWrappedHandleStrict(WrappedVkRes *ptr);
 
+// NTE-DIAG: temporary lifecycle audit. Keep disabled in shipping builds.
+#define NTE_HANDLE_DIAGNOSTICS 0
+#if NTE_HANDLE_DIAGNOSTICS && ENABLED(RDOC_ANDROID)
+#include <dlfcn.h>
+inline bool NTETraceType(VkResourceType type)
+{
+  return type == eResPipeline || type == eResPipelineLayout || type == eResDescriptorPool ||
+         type == eResDescriptorSetLayout || type == eResDevice || type == eResInstance;
+}
+template <typename T>
+void NTECreateCaller(VkDevice device, T obj, void *caller)
+{
+  Dl_info di = {};
+  dladdr(caller, &di);
+  RDCLOG("NTECALL: type=%d dev=%p obj=%p ret=%p base=%p offset=%llx caller=%s",
+         (int)ToTypedHandle(obj).type, (void *)device, (void *)obj, caller, di.dli_fbase,
+         (unsigned long long)((uintptr_t)caller - (uintptr_t)di.dli_fbase),
+         di.dli_fname ? di.dli_fname : "?");
+}
+#endif
+
 // ---------------------------------------------------------------------------------------------
-// TODO(NTE-FRAMEGEN-STALE-HANDLE): the guards below hide a handle-ownership bug, they do not fix it.
+// TODO(NTE-FRAMEGEN-STALE-HANDLE): diagnosed 2026-09-30; SDK initialization bug, not
+// delayed destruction. Retain the guards as a compatibility mitigation, NOT a complete fix.
 //
-// Symptom: a foreign module destroys Vulkan handles it kept across a device teardown, and some of
-// those stale values land inside our wrapper arenas. IsWrappedHandle (above) only compares address
-// ranges, so such a handle is treated as ours, we read and free memory that is not a live wrapper,
-// and the driver is handed a value computed from it - the process dies. Reproduced on NTE
-// (com.hottagames.yh.laohu, Adreno 830, Android 15) with the frame-generation module
-// libframeestimationVK.so.
+// On NTE / Adreno 830, libframeestimationVK.so (SHA-256
+// 4a3b1af65a6c14dffcf28f453abf61928e79d10ea9d0523b03eba640a97a1963) logs
+// "UnSupported vkCreateOpticalFlowSessionNV", then "Init resource failed". Init's failure
+// cleanup calls DestroyResources (Init return offset 0x2911c). The constructor does not
+// initialize numerous handle members which that cleanup reads. Offline ARM64 execution of
+// the constructor on an 0xa5-filled object leaves all 19 observed fields untouched.
 //
-// Evidence from that crash (logcat + tombstones, 2026-09-28):
-//   DESTROYLOG: DestroyPipeline dev=B40000763772A9F0 obj=B40000768768EFE8 member=0
-//               caller=libframeestimationVK.so
-//   DESTROYLOG: DestroyPipeline dev=B40000763772A9F0 obj=00000000CAF65C66 member=0
-//               caller=libframeestimationVK.so
-//   wrapped_pool.h(116) - Error - Resource being deleted through wrong pool - 0xB400007687656F08
-//   stack: vulkan.adreno.so::vkDestroyPipeline <- CFrameGenVK::DestroyResources+3664
-//          <- CFrameGenVK::Init+1920   (RHIThread)
-//   tombstone_14: SIGSEGV at 0xcaf65c72 (the truncated 0xCAF65C66 plus 12); earlier tombstone_10/11
-//   in WrappedVulkan::vkDestroyPipeline+32.
-// Note the two shapes: a plausible-looking stale pointer (8-byte aligned, high address) and a
-// truncated 32-bit value whose low bits still address a mapping.
+// Two uncapped lifecycle/caller audits, injectfrom=1 and =2 respectively, found:
+//   - 19 non-null destroys from DestroyResources: 2 Pipeline, 1 PipelineLayout,
+//     8 DescriptorPool, 8 DescriptorSetLayout. All fail the expected-type pool test.
+//   - 9 drops: Pipeline this+0x7e8 (0x3e954d9 / 0xcaf65c66), PipelineLayout +0x7e0
+//     (0xaffffffff), DescriptorPool +0x308/+0x468 (0x5), DescriptorSetLayout +0x310
+//     (0x1bffffffff), +0x3b8/+0x620/+0x7d8 (0x5), +0x470 (0x3100000009).
+//   - No matching earlier wrapper OR real handle among the four audited resource types;
+//     no create caller from frameestimation for these types. InitResources fails before
+//     InitPiplines is reached. These drops do not withhold destruction of created objects:
+//     attributable leaked objects = 0 (not a measurement of total process/driver memory).
+//   - The other 10 uninitialized values pass the address heuristic and are forwarded.
+//     A pointer-shaped garbage value is NOT thereby validated as a real driver handle.
+//   - Skipping the probe instance preserves the failure path/counts. 0xcaf65c66 also
+//     reproduces in the same uninitialized field; there is no evidence of a deliberate canary.
 //
-// When it reproduces: with the layer attached to the app's real renderer, ~13s into the run, while
-// the frame-generation module initialises (CFrameGenVK::Init) and destroys resources that belong to
-// an earlier device/instance - i.e. it needs the module's init path plus handles that were stored
-// before our layer chained in (a device teardown followed by a module re-init). With the guards in
-// place the app survives indefinitely (verified 3+ minutes) and this crash has not recurred.
+// This supersedes the old claims of proven cross-instance/stale-wrapper ownership and
+// "each drop leaks an object". "Wrong pool" proves only nonmembership in that type's pool.
+// Likewise, absence from layer creation logs alone cannot rule out unlayered driver objects.
+// The diagnosis above also relies on caller offsets, failure control flow and constructor
+// execution. Full evidence, field table, audit scripts and capture results are in
+// KSU_renderdochider/docs/NTE_HANDLE_AUDIT_2026-09-30.md and docs/RUNBOOK.md.
 //
-// The guards are not only load-bearing for that one crash - they fire in an ordinary run too. On the
-// same build, 14s after launch: DestroyPipeline 0x3E954D9, DestroyPipelineLayout 0xAFFFFFFFF,
-// DestroyDescriptorPool 0x5, DestroyDescriptorSetLayout 0x1BFFFFFFFF / 0x5 / 0x3100000009. None of
-// those can be a driver handle, so some module is destroying objects with values that are not
-// handles at all. Each drop then either leaks a real object (the handle really was the only copy) or
-// is harmless (the object was already destroyed and the field is stale) - the log cannot tell which
-// without the caller, which is what the DESTROYLOG probe records.
+// Root repair belongs in the SDK: initialize ALL handle members to VK_NULL_HANDLE, clean
+// up only successfully initialized resources, and clear them on release. We cannot safely
+// reconstruct an arbitrary original handle from garbage, or forward unsupported optical-flow
+// entry points with wrapped arguments. Changing the wrapper pool/instance injection cannot
+// repair these uninitialized SDK fields. No SDK binary patch is deployed here.
 //
-// What the guards do, and their cost: handles that are not ours are dropped (or forwarded only when
-// IsPlausibleDriverHandle accepts them) instead of being dereferenced, which trades the crash for a
-// leak - the objects behind the dropped handles are never released, and the foreign module still
-// believes it destroyed them. That is papering over wrong ownership, not fixing it.
-//
-// What a real fix looks like (either is more than a one-line change):
-//  1. Make membership mean "live wrapper of a known type", not "address inside an arena":
-//     ItemPool::IsMember only checks arena bounds plus item-boundary alignment, it never consults the
-//     free stack, and Release() only scrubs slots (memset 0xfe) under ENABLED(RDOC_DEVEL) - so a
-//     freed slot still passes. Add liveness (free-list/flag) checking, and/or scrub freed slots in
-//     every build so a stale handle cannot masquerade as a live object.
-//  2. Make ownership explicit: give WrappedVkRes a magic/type tag plus the owning device, and route
-//     destruction through the ResourceManager that owns the object instead of a global pool test.
-//     That answers the question every destroy entry point is really asking: "is this our object on
-//     the device making this call?", not "is this address in one of our arenas?".
-// To reproduce with full detail, uncomment the NTE-DIAG probes (DESTROYLOG in
-// wrappers/vk_misc_funcs.cpp, DEVICELOG / CREATELOG in wrappers/vk_device_funcs.cpp and
-// vk_shader_funcs.cpp - `grep -rn NTE-DIAG` lists them all) and rebuild.
+// Remaining general guard limitations: IsMember checks range/alignment, not slot liveness
+// or owning device; recycled addresses can alias live wrappers. Adding liveness alone must
+// NOT send freed wrapper addresses through the raw-driver fallback. Global pools do not
+// encode owner device. Any future provenance fix needs separate wrapper/raw/tombstone paths
+// and normal capture/replay validation, not merely a stronger predicate plus this fallback.
+// NTE-DIAG: set NTE_HANDLE_DIAGNOSTICS=1 above only for an unstripped diagnostic build;
+// restore 0 afterwards. The audit is uncapped and can produce large logs.
 // ---------------------------------------------------------------------------------------------
-// Strict form of the same question for a known type: a live wrapper sits exactly on an item boundary
-// of the pool for that type, while a stale handle an in-process module kept across a device teardown
-// can land inside one of our arenas by chance and still pass the range test above. Acting on such a
-// pointer reads and frees memory that is not a wrapper. The destroy entry points guard with this
-// instead of IsWrappedHandle.
+// Exact slot boundary in the expected type's pool. This is NOT a liveness/ownership check.
 #define IS_OUR_WRAPPER(type, obj) (CONCAT(Wrapped, type)::IsMember((const void *)(obj)))
 
-// Could this value be a handle at all? Driver handles are 8-byte aligned pointers well above the
-// 32-bit range; a truncated or overwritten field is neither. Forwarding a value that fails this test
-// is what takes the driver down.
+// Compatibility heuristic for the observed Android/Adreno failure, not a Vulkan guarantee.
+// Non-dispatchable handles are opaque: alignment/size does not prove validity or ownership.
+// In particular, pointer-shaped uninitialized fields also pass this test.
 static inline bool IsPlausibleDriverHandle(const void *obj)
 {
   const uintptr_t value = (uintptr_t)obj;

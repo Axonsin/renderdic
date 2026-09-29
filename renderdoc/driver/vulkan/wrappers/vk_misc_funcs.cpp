@@ -27,12 +27,6 @@
 #include "../vk_replay.h"
 #include "core/settings.h"
 
-// NTE-DIAG(2026-09-29): this include is only needed by the DESTROYLOG probe below (dladdr/Dl_info).
-// Uncomment it together with that probe.
-// #if ENABLED(RDOC_ANDROID)
-// #include <dlfcn.h>
-// #endif
-
 RDOC_CONFIG(
     bool, Vulkan_Hack_DisableRPNormalisation, false,
     "Disable default behaviour to normalise renderpasses to be more consistent and debuggable.");
@@ -163,46 +157,43 @@ static void MakeSubpassLoadRP(RPCreateInfo &info, const RPCreateInfo *origInfo, 
   }
 }
 
-// A handle that arrives at one of our destroy entry points is ours only when it sits exactly on an
-// item boundary of the pool for its type (IS_OUR_WRAPPER, ../vk_resources.h). IsWrappedHandle only
-// compares arena address ranges, so a stale handle another in-process module kept across a device
-// teardown can land inside one of our arenas by chance - the bookkeeping below would then read and
-// free memory that is not a live wrapper and hand the driver a value computed from it. A handle that
-// is not ours goes to the driver through FORWARD_OR_DROP_FOREIGN, which drops values that cannot be
-// handles at all instead of taking the driver down with them.
-// See TODO(NTE-FRAMEGEN-STALE-HANDLE) in ../../vk_resources.h: dropping the foreign handles keeps the
-// process alive but leaks the objects behind them, and the real ownership fix is still open.
+// Check the expected pool's slot boundaries before dereferencing a foreign value. This is
+// not a liveness or owner check. The raw-driver fallback is only a compatibility heuristic;
+// see TODO(NTE-FRAMEGEN-STALE-HANDLE) in ../vk_resources.h for the diagnosed SDK initialization
+// bug, zero attributable leaks for the audited drops, and remaining pointer-shaped garbage risk.
 
 // note, for threading reasons we ensure to release the wrappers before
 // releasing the underlying object. Otherwise after releasing the vulkan object
 // that same handle could be returned by create on another thread, and we
 // could end up trying to re-wrap it.
+// NTE-DIAG: no cap, so absence from the lifecycle log is meaningful for these types.
+#if NTE_HANDLE_DIAGNOSTICS && ENABLED(RDOC_ANDROID)
+#define NTE_DESTROY_TRACE(type, func, device, obj)                                         \
+  do                                                                                     \
+  {                                                                                      \
+    Dl_info di = {};                                                                     \
+    void *caller = __builtin_return_address(0);                                           \
+    dladdr(caller, &di);                                                                  \
+    bool member = IS_OUR_WRAPPER(type, obj);                                              \
+    RDCLOG("NTEDESTROY: " #func " manager=%p dev=%p obj=%p member=%d ret=%p base=%p "       \
+           "offset=%llx caller=%s", GetResourceManager(), (void *)device, (void *)obj,     \
+           (int)member, caller, di.dli_fbase,                                             \
+           (unsigned long long)((uintptr_t)caller - (uintptr_t)di.dli_fbase),              \
+           di.dli_fname ? di.dli_fname : "?");                                           \
+  } while(0)
+#else
+#define NTE_DESTROY_TRACE(type, func, device, obj) do { } while(0)
+#endif
+
 #define DESTROY_IMPL(type, func)                                                         \
   void WrappedVulkan::vk##func(VkDevice device, type obj, const VkAllocationCallbacks *) \
   {                                                                                      \
     if(obj == VK_NULL_HANDLE)                                                            \
       return;                                                                            \
-    /* NTE-DIAG(2026-09-29): probe logging the first 150 destroys per instantiation (15  \
-     * of them) with caller and handle identity, commented out. It exists to diagnose the\
-     * foreign-handle crash - see TODO(NTE-FRAMEGEN-STALE-HANDLE) in ../vk_resources.h.  \
-     * Uncomment it together with the dlfcn.h include at the top of this file.           \
-    {                                                                                    \
-      static int32_t s_destroyLog = 0;                                                    \
-      if(s_destroyLog < 150)                                                              \
-      {                                                                                  \
-        s_destroyLog++;                                                                   \
-        Dl_info di = {};                                                                  \
-        dladdr(__builtin_return_address(0), &di);                                          \
-        RDCLOG("DESTROYLOG: " #func " dev=%p obj=%p member=%d caller=%s", (void *)device,  \
-               (void *)obj, (int)IS_OUR_WRAPPER(type, obj),                              \
-               (di.dli_fname && di.dli_fname[0]) ? di.dli_fname : "<unknown>");           \
-      }                                                                                   \
-    }                                                                                     \
-    */                                                                                   \
+    NTE_DESTROY_TRACE(type, func, device, obj);                                           \
     if(!IS_OUR_WRAPPER(type, obj))                                                        \
     {                                                                                    \
-      /* not a live wrapper of ours: either a raw handle created before our layer chained \
-       * in, or a stale value a module kept from a device that has since gone. */         \
+      /* Outside this type's slots: may be a raw handle, stale value or garbage. */       \
       FORWARD_OR_DROP_FOREIGN(func, device, obj);                                         \
       return;                                                                            \
     }                                                                                    \
@@ -230,6 +221,7 @@ DESTROY_IMPL(VkSamplerYcbcrConversion, DestroySamplerYcbcrConversion)
 DESTROY_IMPL(VkShaderEXT, DestroyShaderEXT)
 
 #undef DESTROY_IMPL
+#undef NTE_DESTROY_TRACE
 
 void WrappedVulkan::vkDestroyImageView(VkDevice device, VkImageView obj, const VkAllocationCallbacks *)
 {
