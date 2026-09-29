@@ -27,9 +27,11 @@
 #include "../vk_replay.h"
 #include "core/settings.h"
 
-#if ENABLED(RDOC_ANDROID)
-#include <dlfcn.h>
-#endif
+// NTE-DIAG(2026-09-29): this include is only needed by the DESTROYLOG probe below (dladdr/Dl_info).
+// Uncomment it together with that probe.
+// #if ENABLED(RDOC_ANDROID)
+// #include <dlfcn.h>
+// #endif
 
 RDOC_CONFIG(
     bool, Vulkan_Hack_DisableRPNormalisation, false,
@@ -168,6 +170,8 @@ static void MakeSubpassLoadRP(RPCreateInfo &info, const RPCreateInfo *origInfo, 
 // free memory that is not a live wrapper and hand the driver a value computed from it. A handle that
 // is not ours goes to the driver through FORWARD_OR_DROP_FOREIGN, which drops values that cannot be
 // handles at all instead of taking the driver down with them.
+// See TODO(NTE-FRAMEGEN-STALE-HANDLE) in ../../vk_resources.h: dropping the foreign handles keeps the
+// process alive but leaks the objects behind them, and the real ownership fix is still open.
 
 // note, for threading reasons we ensure to release the wrappers before
 // releasing the underlying object. Otherwise after releasing the vulkan object
@@ -178,8 +182,10 @@ static void MakeSubpassLoadRP(RPCreateInfo &info, const RPCreateInfo *origInfo, 
   {                                                                                      \
     if(obj == VK_NULL_HANDLE)                                                            \
       return;                                                                            \
-    /* NTE diagnostics: log the first destroys with caller and handle identity, so a     \
-     * crash inside the driver can be told apart from a crash in our own translation. */  \
+    /* NTE-DIAG(2026-09-29): probe logging the first 150 destroys per instantiation (15  \
+     * of them) with caller and handle identity, commented out. It exists to diagnose the\
+     * foreign-handle crash - see TODO(NTE-FRAMEGEN-STALE-HANDLE) in ../vk_resources.h.  \
+     * Uncomment it together with the dlfcn.h include at the top of this file.           \
     {                                                                                    \
       static int32_t s_destroyLog = 0;                                                    \
       if(s_destroyLog < 150)                                                              \
@@ -192,6 +198,7 @@ static void MakeSubpassLoadRP(RPCreateInfo &info, const RPCreateInfo *origInfo, 
                (di.dli_fname && di.dli_fname[0]) ? di.dli_fname : "<unknown>");           \
       }                                                                                   \
     }                                                                                     \
+    */                                                                                   \
     if(!IS_OUR_WRAPPER(type, obj))                                                        \
     {                                                                                    \
       /* not a live wrapper of ours: either a raw handle created before our layer chained \

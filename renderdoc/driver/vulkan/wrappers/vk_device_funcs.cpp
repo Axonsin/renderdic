@@ -33,9 +33,11 @@
 #include "driver/ihv/nv/nv_aftermath.h"
 #include "strings/string_utils.h"
 
-#if ENABLED(RDOC_ANDROID)
-#include <dlfcn.h>
-#endif
+// NTE-DIAG(2026-09-29): this include is only needed by the DEVICELOG probes below (dladdr/Dl_info).
+// Uncomment it together with them.
+// #if ENABLED(RDOC_ANDROID)
+// #include <dlfcn.h>
+// #endif
 
 RDOC_CONFIG(
     bool, Vulkan_Debug_ReplaceAppInfo, true,
@@ -5448,7 +5450,9 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
 
   FirstFrame();
 
-  /* NTE diagnostics: which module created a device, and what handle the app sees for it. */
+  /* NTE-DIAG(2026-09-29): probe recording which module created a device and what wrapper handle the
+   * app sees for it, commented out. Uncomment when a foreign/stale handle needs to be traced back to
+   * the device it was created on - see TODO(NTE-FRAMEGEN-STALE-HANDLE) in ../vk_resources.h.
   {
     Dl_info di = {};
     dladdr(__builtin_return_address(0), &di);
@@ -5457,6 +5461,7 @@ VkResult WrappedVulkan::vkCreateDevice(VkPhysicalDevice physicalDevice,
            (void *)((*pDevice != VK_NULL_HANDLE) ? Unwrap(*pDevice) : VK_NULL_HANDLE),
            (di.dli_fname && di.dli_fname[0]) ? di.dli_fname : "<unknown>");
   }
+  */
 
   return ret;
 }
@@ -5466,7 +5471,9 @@ void WrappedVulkan::vkDestroyDevice(VkDevice device, const VkAllocationCallbacks
   if(device == VK_NULL_HANDLE)
     return;
 
-  /* NTE diagnostics: device teardown (suspected source of the stale handles modules keep). */
+  /* NTE-DIAG(2026-09-29): probe dating the device teardown (the suspected source of the stale
+   * handles modules keep - see TODO(NTE-FRAMEGEN-STALE-HANDLE) in ../vk_resources.h). Commented out;
+   * uncomment together with the create-side DEVICELOG probe above.
   {
     Dl_info di = {};
     dladdr(__builtin_return_address(0), &di);
@@ -5474,6 +5481,7 @@ void WrappedVulkan::vkDestroyDevice(VkDevice device, const VkAllocationCallbacks
            (void *)Unwrap(device),
            (di.dli_fname && di.dli_fname[0]) ? di.dli_fname : "<unknown>");
   }
+  */
 
   if(m_MemoryFreeThread)
   {

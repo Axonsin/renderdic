@@ -28,9 +28,11 @@
 #include "driver/ihv/nv/nv_aftermath.h"
 #include "driver/shaders/spirv/spirv_reflect.h"
 
-#if ENABLED(RDOC_ANDROID)
-#include <dlfcn.h>
-#endif
+// NTE-DIAG(2026-09-29): this include is only needed by the CREATELOG probe below (dladdr/Dl_info).
+// Uncomment it together with that probe.
+// #if ENABLED(RDOC_ANDROID)
+// #include <dlfcn.h>
+// #endif
 
 RDOC_EXTERN_CONFIG(bool, Replay_Debug_SingleThreadedCompilation);
 
@@ -973,9 +975,10 @@ VkResult WrappedVulkan::vkCreateGraphicsPipelines(VkDevice device, VkPipelineCac
 
       ResourceId id = GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), pPipelines[i]);
 
-      /* NTE diagnostics: the app-visible handle is our wrapper. Logging it next to the device makes
-       * it decidable from a log whether a later destroy passes our pointer or a raw driver handle,
-       * and which device the pipeline was created on. */
+      /* NTE-DIAG(2026-09-29): probe logging every created pipeline handle with its caller, commented
+       * out - it fires on the hot creation path (capped at 4000 per process). Uncomment when a
+       * destroy/foreign-handle problem needs the create-side identity, see
+       * TODO(NTE-FRAMEGEN-STALE-HANDLE) in ../vk_resources.h.
       {
         static int32_t s_gfxPipeLog = 0;
         if(s_gfxPipeLog < 4000)
@@ -988,6 +991,7 @@ VkResult WrappedVulkan::vkCreateGraphicsPipelines(VkDevice device, VkPipelineCac
                  (di.dli_fname && di.dli_fname[0]) ? di.dli_fname : "<unknown>");
         }
       }
+      */
 
       if(IsCaptureMode(m_State))
       {

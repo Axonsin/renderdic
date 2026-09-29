@@ -3588,8 +3588,7 @@ void WrappedVulkan::Present(DeviceOwnedWindow devWnd)
   if(!activeWindow)
   {
     // this return silently swallows the whole trigger path for this present, and the only externally
-    // visible sign is that no capture ever triggers. Rate limited probe, indexed by drop count (first
-    // 5, then one every 600) so a fight over the active window is visible in the log.
+    // visible sign is that no capture ever triggers.
     //
     // if this fires for the rendering window, the active window was taken by someone else - the
     // m_ActiveWindow selection is "first registrant wins" (core.cpp AddFrameCapturer) and there is
@@ -3601,13 +3600,17 @@ void WrappedVulkan::Present(DeviceOwnedWindow devWnd)
     // the condition with MatchClosestWindow - it rewrites devWnd to the nearest registered window and
     // returns true, i.e. it disables the filter for every registered window and lets any instance's
     // present start or end the capture.
-    static int32_t droppedPresents = 0;
-    const int32_t dropped = Atomic::Inc32(&droppedPresents) - 1;
-    if(dropped < 5 || (dropped % 600) == 0)
-      RDCLOG("VKPRESENT: DROPPED frame %u - window %p is not the active window (instance %p state=%d "
-             "tid=%llu)",
-             m_FrameCounter, devWnd.windowHandle, (void *)m_Instance, (int)m_State,
-             (unsigned long long)Threading::GetCurrentID());
+    //
+    // NTE-DIAG(2026-09-29): drop-rate probe, commented out - the rate limit still cost a modulo per
+    // present reaching an inactive window. Uncomment when a capture fails to trigger and the
+    // candidate explanation is "the trigger was dropped here" (first 5 drops, then one every 600).
+    // static int32_t droppedPresents = 0;
+    // const int32_t dropped = Atomic::Inc32(&droppedPresents) - 1;
+    // if(dropped < 5 || (dropped % 600) == 0)
+    //   RDCLOG("VKPRESENT: DROPPED frame %u - window %p is not the active window (instance %p state=%d "
+    //          "tid=%llu)",
+    //          m_FrameCounter, devWnd.windowHandle, (void *)m_Instance, (int)m_State,
+    //          (unsigned long long)Threading::GetCurrentID());
 
     // first present to *any* window, even inactive, terminates frame 0
     if(m_FirstFrameCapture && IsActiveCapturing(m_State))

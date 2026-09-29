@@ -157,8 +157,10 @@ class VulkanHook : LibraryHook
     RDCLOG("Registering Vulkan hooks");
 
 #if ENABLED(RDOC_ANDROID)
-    // inject our layer into instances created through the loader. The destroy-guard in
-    // vk_misc_funcs.cpp (unknown-resource skip) keeps the frame-estimation module alive.
+    // inject our layer into instances created through the loader. The IS_OUR_WRAPPER /
+    // FORWARD_OR_DROP_FOREIGN guards on the destroy entry points (vk_misc_funcs.cpp,
+    // vk_wsi_funcs.cpp, vk_resource_funcs.cpp) are what keep the frame-estimation module from taking
+    // the process down - see TODO(NTE-FRAMEGEN-STALE-HANDLE) in vk_resources.h.
     LibraryHooks::RegisterLibraryHook("libvulkan.so", NULL);
     LibraryHooks::RegisterFunctionHook(
         "libvulkan.so",
@@ -279,8 +281,10 @@ static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
   // creating a device or swapchain), so injecting on that one and then gating on it leaves the real
   // renderer unlayered: nothing renders through us and no present ever reaches us.
   //
-  // Instead we inject into a bounded number of instances, and log every create - including the ones
-  // we skip and where they came from - so the log alone identifies which creates reach this hook.
+  // Instead we inject into a bounded number of instances, and log the injection decision once per
+  // create - that single line is what identifies which creates reach this hook. The per-skip detail
+  // logs are NTE-DIAG probes kept commented below, next to the branch they describe: uncomment them
+  // (`grep -rn NTE-DIAG`) when an injection problem needs re-diagnosing.
   // The bound matters: auxiliary modules (MFRC, frame-estimation) can self-create instances later
   // in the process lifetime and chaining all of them into the single global layer state mixes
   // wrapped handles from independent instances.
@@ -306,8 +310,10 @@ static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
 
   if(RenderDoc::Inst().IsReplayApp())
   {
-    RDCLOG("VKINJECT: skip (replay app) app='%s' engine='%s' tid=%llu caller=%s", appName,
-           engineName, tid, callerName);
+    // NTE-DIAG(2026-09-29): skip-detail probe, commented to keep the log to the decision line.
+    // Uncomment together with the other NTE-DIAG blocks when injection needs re-diagnosing.
+    // RDCLOG("VKINJECT: skip (replay app) app='%s' engine='%s' tid=%llu caller=%s", appName,
+    //        engineName, tid, callerName);
     return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
   }
 
@@ -319,8 +325,9 @@ static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
        rdcstr(pCreateInfo->pApplicationInfo->pApplicationName) == RDOC_PRODUCT_NAME " forced instance");
   if(internalInstance)
   {
-    RDCLOG("VKINJECT: skip (our forced instance) app='%s' tid=%llu caller=%s", appName, tid,
-           callerName);
+    // NTE-DIAG(2026-09-29): skip-detail probe (see the note above the replay skip).
+    // RDCLOG("VKINJECT: skip (our forced instance) app='%s' tid=%llu caller=%s", appName, tid,
+    //        callerName);
     return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
   }
 
@@ -333,8 +340,10 @@ static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
   const int32_t injectFrom = GetInjectFromInstance();
   if(instanceIndex < injectFrom - 1)
   {
-    RDCLOG("VKINJECT: skip (index %d < injectfrom-1 %d) app='%s' engine='%s' tid=%llu caller=%s",
-           (int)instanceIndex, (int)(injectFrom - 1), appName, engineName, tid, callerName);
+    // NTE-DIAG(2026-09-29): skip-detail probe (see the note above the replay skip). This one is the
+    // signature of the debug.rdoc.injectfrom knob working.
+    // RDCLOG("VKINJECT: skip (index %d < injectfrom-1 %d) app='%s' engine='%s' tid=%llu caller=%s",
+    //        (int)instanceIndex, (int)(injectFrom - 1), appName, engineName, tid, callerName);
     return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
   }
 
@@ -343,8 +352,9 @@ static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
   // wrapped handles from independent instances.
   if(instanceIndex >= injectFrom - 1 + kMaxInjectedInstances)
   {
-    RDCLOG("VKINJECT: skip (cap %d reached at index %d) app='%s' engine='%s' tid=%llu caller=%s",
-           kMaxInjectedInstances, (int)instanceIndex, appName, engineName, tid, callerName);
+    // NTE-DIAG(2026-09-29): skip-detail probe (see the note above the replay skip).
+    // RDCLOG("VKINJECT: skip (cap %d reached at index %d) app='%s' engine='%s' tid=%llu caller=%s",
+    //        kMaxInjectedInstances, (int)instanceIndex, appName, engineName, tid, callerName);
     return real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
   }
 
@@ -379,13 +389,18 @@ static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
     info.ppEnabledLayerNames = &layers[0];
   }
 
+  // the injection decision, deliberately kept live: at most a handful of lines per process and the
+  // only directly visible evidence of whether the layer reached the renderer's instance (the failure
+  // that cost days - see log/README.md and the runbook). Everything else in this function is
+  // NTE-DIAG.
   RDCLOG("VKINJECT: %s %s app='%s' engine='%s' tid=%llu caller=%s layers='%s' pAppInfo=%p",
          present ? "already enabled" : "injecting", layerName, appName, engineName, tid, callerName,
          layerList.c_str(), (void *)(pCreateInfo ? pCreateInfo->pApplicationInfo : NULL));
 
   VkResult ret = real_vkCreateInstance(&info, pAllocator, pInstance);
-  RDCLOG("VKINJECT: vkCreateInstance(app='%s') returned %d, instance %p", appName, ret,
-         pInstance ? *pInstance : NULL);
+  // NTE-DIAG(2026-09-29): return-value probe, commented out.
+  // RDCLOG("VKINJECT: vkCreateInstance(app='%s') returned %d, instance %p", appName, ret,
+  //        pInstance ? *pInstance : NULL);
   return ret;
 }
 #endif

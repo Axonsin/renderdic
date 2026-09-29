@@ -2408,9 +2408,11 @@ void RenderDoc::AddFrameCapturer(DeviceOwnedWindow devWnd, IFrameCapturer *cap)
   {
     m_ActiveWindow = devWnd;
 
-    // the drivers drop every present to a window that isn't this one (WrappedVulkan::Present), so
-    // whichever registration takes it here is what a missing capture has to be attributed to
-    RDCLOG("Active window taken by %#p / %#p", m_ActiveWindow.device, m_ActiveWindow.windowHandle);
+    // NTE-DIAG(2026-09-29): probe recording who took the active window, commented out. The drivers
+    // drop every present to a window that isn't this one (WrappedVulkan::Present), so when a capture
+    // fails to trigger this line attributes the drop to the registration that won. Uncomment when
+    // diagnosing a missing trigger.
+    // RDCLOG("Active window taken by %#p / %#p", m_ActiveWindow.device, m_ActiveWindow.windowHandle);
   }
 }
 

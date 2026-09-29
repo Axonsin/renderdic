@@ -570,11 +570,13 @@ HOOK_EXPORT EGLBoolean EGLAPIENTRY eglMakeCurrent_renderdoc_hooked(EGLDisplay di
 
 HOOK_EXPORT EGLBoolean EGLAPIENTRY eglSwapBuffers_renderdoc_hooked(EGLDisplay dpy, EGLSurface surface)
 {
-  {
-    static std::atomic<int> probeFirst{0};
-    if(probeFirst++ == 0)
-      RDCLOG("PROBE eglSwapBuffers FIRST ENTRY dpy=%p surf=%p", dpy, surface);
-  }
+  // NTE-DIAG(2026-09-29): first-entry probe, commented out (GL path only, the target app renders
+  // through Vulkan).
+  // {
+  //   static std::atomic<int> probeFirst{0};
+  //   if(probeFirst++ == 0)
+  //     RDCLOG("PROBE eglSwapBuffers FIRST ENTRY dpy=%p surf=%p", dpy, surface);
+  // }
   if(RenderDoc::Inst().IsReplayApp())
   {
     if(!EGL.SwapBuffers)
@@ -1206,7 +1208,9 @@ HOOK_EXPORT void AndroidGLESLayer_Initialize(void *layer_id,
 HOOK_EXPORT void *AndroidGLESLayer_GetProcAddress(const char *funcName,
                                                   __eglMustCastToProperFunctionPointerType next)
 {
-  RDCLOG("GLESLayerGPA(%s)", funcName ? funcName : "(null)");
+  // NTE-DIAG(2026-09-29): probe logging every GetProcAddress query, commented out - it fires on
+  // every lookup the app makes, the highest-volume probe of the set.
+  // RDCLOG("GLESLayerGPA(%s)", funcName ? funcName : "(null)");
 // return our egl hooks
 #define GPA_FUNCTION(name, isext, replayrequired) \
   if(!strcmp(funcName, "egl" STRINGIZE(name)))    \
