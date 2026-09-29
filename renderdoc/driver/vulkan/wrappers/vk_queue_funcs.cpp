@@ -1248,7 +1248,7 @@ void WrappedVulkan::CaptureQueueSubmit(VkQueue queue,
             VkMappedMemoryRange range = {
                 VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
                 NULL,
-                (VkDeviceMemory)(uint64_t)record->Resource,
+                ToWrappedHandle<VkDeviceMemory>(record->Resource),
                 state.mapOffset + diffStart,
                 diffEnd - diffStart,
             };

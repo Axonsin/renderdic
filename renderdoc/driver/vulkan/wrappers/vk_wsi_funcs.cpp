@@ -309,7 +309,9 @@ VkResult WrappedVulkan::vkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR 
           RDCASSERT(imageToWrap != VK_NULL_HANDLE);
         }
 
-        ResourceId id = GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), imageToWrap);
+        ResourceId id =
+            GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), imageToWrap, 0, false);
+        GetResourceManager()->GuardSetPool(imageToWrap, swapchain, true);
 
         Chunk *chunk = NULL;
 
@@ -1503,16 +1505,10 @@ void WrappedVulkan::vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surfac
   if(surface == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the destroy straight down to the driver - everything below dereferences surface as one of ours.
-  // The input window and frame capturer it would unregister were never registered either.
-  // See TODO(NTE-FRAMEGEN-STALE-HANDLE) in ../vk_resources.h for what this trades away.
-  if(!IS_OUR_WRAPPER(VkSurfaceKHR, surface))
+  // [HANDLE-GUARD] Surface ownership belongs to its creating instance.
+  if(!GetResourceManager()->BeginDestroy(instance, surface))
   {
-    if(IsPlausibleDriverHandle((const void *)surface))
-      ObjDisp(instance)->DestroySurfaceKHR(Unwrap(instance), surface, NULL);
-    else
-      RDCWARN("DestroySurfaceKHR: dropping implausible handle %p", (void *)surface);
+    FORWARD_OR_DROP_FOREIGN(DestroySurfaceKHR, instance, surface);
     return;
   }
 

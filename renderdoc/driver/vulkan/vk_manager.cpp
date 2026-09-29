@@ -1093,3 +1093,83 @@ bool VulkanResourceManager::IsResourceTrackedForPersistency(WrappedVkRes *const 
 {
   return IsPostponableRes(res);
 }
+
+// [HANDLE-GUARD] Failure cleanup uses raw dispatch parents and never routes an unregistered value
+// through the public destroy guard. Borrowed objects are released by their parent, not individually.
+void VulkanResourceManager::GuardRegistrationFailed(uint32_t type, uint64_t real,
+                                                    uint32_t parentType, uint64_t parent,
+                                                    uint64_t allocationPool, bool ownsObject)
+{
+  if(!ownsObject)
+    return;
+  VulkanHandleGuard::Snapshot snapshot;
+  if(VulkanHandleGuard::Get().Inspect(parent, snapshot) && snapshot.type == parentType)
+    parent = snapshot.real;
+  if(type == eResInstance)
+  {
+    GetInstanceDispatchTable((void *)(uintptr_t)real)->DestroyInstance((VkInstance)real, NULL);
+    return;
+  }
+  if(type == eResSurface)
+  {
+    GetInstanceDispatchTable((void *)(uintptr_t)parent)
+        ->DestroySurfaceKHR((VkInstance)parent, (VkSurfaceKHR)real, NULL);
+    return;
+  }
+  if(type == eResPhysicalDevice || type == eResQueue)
+    return;
+  VkDevice device = (VkDevice)parent;
+  VkDevDispatchTable *table = GetDeviceDispatchTable(device);
+  switch(type)
+  {
+    case eResDevice: table->DestroyDevice((VkDevice)real, NULL); break;
+    case eResDeviceMemory: table->FreeMemory(device, (VkDeviceMemory)real, NULL); break;
+    case eResSwapchain: table->DestroySwapchainKHR(device, (VkSwapchainKHR)real, NULL); break;
+    case eResBuffer: table->DestroyBuffer(device, (VkBuffer)real, NULL); break;
+    case eResImage: table->DestroyImage(device, (VkImage)real, NULL); break;
+    case eResBufferView: table->DestroyBufferView(device, (VkBufferView)real, NULL); break;
+    case eResImageView: table->DestroyImageView(device, (VkImageView)real, NULL); break;
+    case eResFramebuffer: table->DestroyFramebuffer(device, (VkFramebuffer)real, NULL); break;
+    case eResRenderPass: table->DestroyRenderPass(device, (VkRenderPass)real, NULL); break;
+    case eResShaderModule: table->DestroyShaderModule(device, (VkShaderModule)real, NULL); break;
+    case eResPipelineCache: table->DestroyPipelineCache(device, (VkPipelineCache)real, NULL); break;
+    case eResPipelineLayout:
+      table->DestroyPipelineLayout(device, (VkPipelineLayout)real, NULL);
+      break;
+    case eResPipeline: table->DestroyPipeline(device, (VkPipeline)real, NULL); break;
+    case eResSampler: table->DestroySampler(device, (VkSampler)real, NULL); break;
+    case eResDescriptorPool:
+      table->DestroyDescriptorPool(device, (VkDescriptorPool)real, NULL);
+      break;
+    case eResDescriptorSetLayout:
+      table->DestroyDescriptorSetLayout(device, (VkDescriptorSetLayout)real, NULL);
+      break;
+    case eResCommandPool: table->DestroyCommandPool(device, (VkCommandPool)real, NULL); break;
+    case eResFence: table->DestroyFence(device, (VkFence)real, NULL); break;
+    case eResEvent: table->DestroyEvent(device, (VkEvent)real, NULL); break;
+    case eResQueryPool: table->DestroyQueryPool(device, (VkQueryPool)real, NULL); break;
+    case eResSemaphore: table->DestroySemaphore(device, (VkSemaphore)real, NULL); break;
+    case eResDescUpdateTemplate:
+      table->DestroyDescriptorUpdateTemplate(device, (VkDescriptorUpdateTemplate)real, NULL);
+      break;
+    case eResSamplerConversion:
+      table->DestroySamplerYcbcrConversion(device, (VkSamplerYcbcrConversion)real, NULL);
+      break;
+    case eResAccelerationStructureKHR:
+      table->DestroyAccelerationStructureKHR(device, (VkAccelerationStructureKHR)real, NULL);
+      break;
+    case eResShaderEXT: table->DestroyShaderEXT(device, (VkShaderEXT)real, NULL); break;
+    case eResCommandBuffer:
+      if(allocationPool)
+      {
+        VkCommandBuffer command = (VkCommandBuffer)real;
+        table->FreeCommandBuffers(device, (VkCommandPool)allocationPool, 1, &command);
+      }
+      break;
+    case eResDescriptorSet:
+      // Individual descriptor frees may be forbidden by the pool flags. The fatal failure
+      // path tears down the owning process/pool; do not make an invalid FreeDescriptorSets call.
+      break;
+    default: break;
+  }
+}

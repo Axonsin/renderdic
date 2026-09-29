@@ -190,11 +190,11 @@ static void MakeSubpassLoadRP(RPCreateInfo &info, const RPCreateInfo *origInfo, 
   {                                                                                      \
     if(obj == VK_NULL_HANDLE)                                                            \
       return;                                                                            \
-    NTE_DESTROY_TRACE(type, func, device, obj);                                           \
-    if(!IS_OUR_WRAPPER(type, obj))                                                        \
+    NTE_DESTROY_TRACE(type, func, device, obj);                                          \
+    if(!GetResourceManager()->BeginDestroy(device, obj))                                 \
     {                                                                                    \
-      /* Outside this type's slots: may be a raw handle, stale value or garbage. */       \
-      FORWARD_OR_DROP_FOREIGN(func, device, obj);                                         \
+      /* Outside this type's slots: may be a raw handle, stale value or garbage. */      \
+      FORWARD_OR_DROP_FOREIGN(func, device, obj);                                        \
       return;                                                                            \
     }                                                                                    \
     type unwrappedObj = Unwrap(obj);                                                     \
@@ -225,12 +225,16 @@ DESTROY_IMPL(VkShaderEXT, DestroyShaderEXT)
 
 void WrappedVulkan::vkDestroyImageView(VkDevice device, VkImageView obj, const VkAllocationCallbacks *)
 {
+  GuardedDestroyImageView(device, obj, false);
+}
+
+void WrappedVulkan::GuardedDestroyImageView(VkDevice device, VkImageView obj, bool deferred)
+{
   if(obj == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
-  if(!IS_OUR_WRAPPER(VkImageView, obj))
+  // [HANDLE-GUARD] Claim identity before unwrapping or touching capture bookkeeping.
+  if(!GetResourceManager()->BeginDestroy(device, obj, deferred))
   {
     FORWARD_OR_DROP_FOREIGN(DestroyImageView, device, obj);
     return;
@@ -242,8 +246,10 @@ void WrappedVulkan::vkDestroyImageView(VkDevice device, VkImageView obj, const V
   {
     SCOPED_READLOCK(m_CapTransitionLock);
     SCOPED_LOCK(m_DeferredDestructLock);
-    if(IsActiveCapturing(m_State))
+    if(!deferred && IsActiveCapturing(m_State))
     {
+      if(GetResourceManager()->GuardActive())
+        VulkanHandleGuard::Get().Pending(uint64_t(obj));
       m_DeferredDestructResources.DeadImageViews.push_back(obj);
       return;
     }
@@ -265,9 +271,8 @@ void WrappedVulkan::vkDestroySampler(VkDevice device, VkSampler obj, const VkAll
   if(obj == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
-  if(!IS_OUR_WRAPPER(VkSampler, obj))
+  // [HANDLE-GUARD] Claim identity before unwrapping or touching capture bookkeeping.
+  if(!GetResourceManager()->BeginDestroy(device, obj))
   {
     FORWARD_OR_DROP_FOREIGN(DestroySampler, device, obj);
     return;
@@ -290,9 +295,8 @@ void WrappedVulkan::vkDestroyAccelerationStructureKHR(VkDevice device, VkAcceler
   if(obj == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
-  if(!IS_OUR_WRAPPER(VkAccelerationStructureKHR, obj))
+  // [HANDLE-GUARD] Claim identity before unwrapping or touching capture bookkeeping.
+  if(!GetResourceManager()->BeginDestroy(device, obj))
   {
     FORWARD_OR_DROP_FOREIGN(DestroyAccelerationStructureKHR, device, obj);
     return;
@@ -319,9 +323,8 @@ void WrappedVulkan::vkDestroyFramebuffer(VkDevice device, VkFramebuffer obj,
   if(obj == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
-  if(!IS_OUR_WRAPPER(VkFramebuffer, obj))
+  // [HANDLE-GUARD] Claim identity before unwrapping or touching capture bookkeeping.
+  if(!GetResourceManager()->BeginDestroy(device, obj))
   {
     FORWARD_OR_DROP_FOREIGN(DestroyFramebuffer, device, obj);
     return;
@@ -350,9 +353,8 @@ void WrappedVulkan::vkDestroyRenderPass(VkDevice device, VkRenderPass obj,
   if(obj == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
-  if(!IS_OUR_WRAPPER(VkRenderPass, obj))
+  // [HANDLE-GUARD] Claim identity before unwrapping or touching capture bookkeeping.
+  if(!GetResourceManager()->BeginDestroy(device, obj))
   {
     FORWARD_OR_DROP_FOREIGN(DestroyRenderPass, device, obj);
     return;
@@ -377,12 +379,16 @@ void WrappedVulkan::vkDestroyRenderPass(VkDevice device, VkRenderPass obj,
 
 void WrappedVulkan::vkDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAllocationCallbacks *)
 {
+  GuardedDestroyBuffer(device, buffer, false);
+}
+
+void WrappedVulkan::GuardedDestroyBuffer(VkDevice device, VkBuffer buffer, bool deferred)
+{
   if(buffer == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the destroy straight down to the driver - everything below dereferences buffer as one of ours.
-  if(!IS_OUR_WRAPPER(VkBuffer, buffer))
+  // [HANDLE-GUARD] Claim identity before unwrapping or touching capture bookkeeping.
+  if(!GetResourceManager()->BeginDestroy(device, buffer, deferred))
   {
     FORWARD_OR_DROP_FOREIGN(DestroyBuffer, device, buffer);
     return;
@@ -392,9 +398,11 @@ void WrappedVulkan::vkDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAl
   // opaque capture address isn't re-used before the capture completes
   {
     SCOPED_READLOCK(m_CapTransitionLock);
-    if(IsActiveCapturing(m_State) && GetRecord(buffer)->hasBDA)
+    if(!deferred && IsActiveCapturing(m_State) && GetRecord(buffer)->hasBDA)
     {
       SCOPED_LOCK(m_DeferredDestructLock);
+      if(GetResourceManager()->GuardActive())
+        VulkanHandleGuard::Get().Pending(uint64_t(buffer));
       m_DeferredDestructResources.DeadBuffers.push_back(buffer);
       return;
     }
@@ -433,10 +441,9 @@ void WrappedVulkan::vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR obj,
   if(obj == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
+  // [HANDLE-GUARD] Claim identity before unwrapping or touching capture bookkeeping.
   // Note this also skips the internal overlay objects, which only exist for swapchains we wrapped.
-  if(!IS_OUR_WRAPPER(VkSwapchainKHR, obj))
+  if(!GetResourceManager()->BeginDestroy(device, obj))
   {
     FORWARD_OR_DROP_FOREIGN(DestroySwapchainKHR, device, obj);
     return;
@@ -521,12 +528,16 @@ void WrappedVulkan::vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR obj,
 // needs to be separate so we don't erase from m_ImageLayouts in other destroy functions
 void WrappedVulkan::vkDestroyImage(VkDevice device, VkImage obj, const VkAllocationCallbacks *)
 {
+  GuardedDestroyImage(device, obj, false);
+}
+
+void WrappedVulkan::GuardedDestroyImage(VkDevice device, VkImage obj, bool deferred)
+{
   if(obj == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the destroy straight down to the driver - everything below dereferences obj as one of ours.
-  if(!IS_OUR_WRAPPER(VkImage, obj))
+  // [HANDLE-GUARD] Claim identity before unwrapping or touching capture bookkeeping.
+  if(!GetResourceManager()->BeginDestroy(device, obj, deferred))
   {
     FORWARD_OR_DROP_FOREIGN(DestroyImage, device, obj);
     return;
@@ -538,8 +549,10 @@ void WrappedVulkan::vkDestroyImage(VkDevice device, VkImage obj, const VkAllocat
   {
     SCOPED_READLOCK(m_CapTransitionLock);
     SCOPED_LOCK(m_DeferredDestructLock);
-    if(IsActiveCapturing(m_State))
+    if(!deferred && IsActiveCapturing(m_State))
     {
+      if(GetResourceManager()->GuardActive())
+        VulkanHandleGuard::Get().Pending(uint64_t(obj));
       m_DeferredDestructResources.DeadImages.push_back(obj);
       return;
     }
@@ -565,6 +578,9 @@ void WrappedVulkan::vkFreeCommandBuffers(VkDevice device, VkCommandPool commandP
                                          uint32_t commandBufferCount,
                                          const VkCommandBuffer *pCommandBuffers)
 {
+  if(!GetResourceManager()->BeginFreeBatch(device, commandPool, commandBufferCount, pCommandBuffers))
+    return;
+
   for(uint32_t c = 0; c < commandBufferCount; c++)
   {
     if(pCommandBuffers[c] == VK_NULL_HANDLE)
@@ -595,7 +611,7 @@ bool WrappedVulkan::ReleaseResource(WrappedVkRes *res)
 
   WrappedVkNonDispRes *nondisp = (WrappedVkNonDispRes *)res;
   WrappedVkDispRes *disp = (WrappedVkDispRes *)res;
-  uint64_t handle = (uint64_t)nondisp;
+  uint64_t handle = WrappedHandleValue(res);
 
   switch(IdentifyTypeByPtr(res))
   {
@@ -1090,8 +1106,8 @@ bool WrappedVulkan::Serialise_vkCreateFramebuffer(SerialiserType &ser, VkDevice 
           if(GetResourceManager()->HasWrapper(ToTypedHandle(fbinfo.loadFBs[s])))
           {
             // just fetch the existing wrapped object
-            fbinfo.loadFBs[s] =
-                (VkFramebuffer)(uint64_t)GetResourceManager()->GetNonDispWrapper(fbinfo.loadFBs[s]);
+            fbinfo.loadFBs[s] = ToWrappedHandle<VkFramebuffer>(
+                GetResourceManager()->GetNonDispWrapper(fbinfo.loadFBs[s]));
 
             // destroy this instance of the duplicate, as we must have matching create/destroy
             // calls and there won't be a wrapped resource hanging around to destroy this one.
@@ -1413,8 +1429,8 @@ bool WrappedVulkan::Serialise_vkCreateRenderPass(SerialiserType &ser, VkDevice d
           if(GetResourceManager()->HasWrapper(ToTypedHandle(rpinfo.loadRPs[s])))
           {
             // just fetch the existing wrapped object
-            rpinfo.loadRPs[s] =
-                (VkRenderPass)(uint64_t)GetResourceManager()->GetNonDispWrapper(rpinfo.loadRPs[s]);
+            rpinfo.loadRPs[s] = ToWrappedHandle<VkRenderPass>(
+                GetResourceManager()->GetNonDispWrapper(rpinfo.loadRPs[s]));
 
             // destroy this instance of the duplicate, as we must have matching create/destroy
             // calls and there won't be a wrapped resource hanging around to destroy this one.
@@ -1672,8 +1688,8 @@ bool WrappedVulkan::Serialise_vkCreateRenderPass2(SerialiserType &ser, VkDevice 
           if(GetResourceManager()->HasWrapper(ToTypedHandle(rpinfo.loadRPs[s])))
           {
             // just fetch the existing wrapped object
-            rpinfo.loadRPs[s] =
-                (VkRenderPass)(uint64_t)GetResourceManager()->GetNonDispWrapper(rpinfo.loadRPs[s]);
+            rpinfo.loadRPs[s] = ToWrappedHandle<VkRenderPass>(
+                GetResourceManager()->GetNonDispWrapper(rpinfo.loadRPs[s]));
 
             // destroy this instance of the duplicate, as we must have matching create/destroy
             // calls and there won't be a wrapped resource hanging around to destroy this one.
@@ -2298,6 +2314,9 @@ bool WrappedVulkan::Serialise_vkResetQueryPool(SerialiserType &ser, VkDevice dev
 void WrappedVulkan::vkResetQueryPool(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
                                      uint32_t queryCount)
 {
+  if(!GetResourceManager()->ValidateHandle(device, queryPool))
+    return;
+
   SCOPED_DBG_SINK();
 
   SERIALISE_TIME_CALL(
@@ -2522,6 +2541,23 @@ VkResult WrappedVulkan::vkCreateDebugReportCallbackEXT(
   }
 
   *pCallback = (VkDebugReportCallbackEXT)(uint64_t)user;
+  if(GetResourceManager()->GuardActive())
+  {
+    uint64_t handle = GetResourceManager()->RegisterSpecial(
+        uint64_t(instance), VulkanHandleGuard::DebugReport, uint64_t(user->realObject), user);
+    if(!handle)
+    {
+      ObjDisp(instance)->DestroyDebugReportCallbackEXT(Unwrap(instance), user->realObject, NULL);
+      {
+        SCOPED_LOCK(m_CallbacksLock);
+        m_ReportCallbacks.removeOne(user);
+      }
+      delete user;
+      *pCallback = VK_NULL_HANDLE;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    *pCallback = VkDebugReportCallbackEXT(handle);
+  }
 
   return vkr;
 }
@@ -2533,8 +2569,11 @@ void WrappedVulkan::vkDestroyDebugReportCallbackEXT(VkInstance instance,
   if(callback == VK_NULL_HANDLE)
     return;
 
-  UserDebugReportCallbackData *user =
-      (UserDebugReportCallbackData *)(uintptr_t)NON_DISP_TO_UINT64(callback);
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(instance), VulkanHandleGuard::DebugReport,
+                                          uint64_t(callback), snapshot, true))
+    return;
+  UserDebugReportCallbackData *user = (UserDebugReportCallbackData *)snapshot.wrapper;
 
   ObjDisp(instance)->DestroyDebugReportCallbackEXT(Unwrap(instance), user->realObject, NULL);
 
@@ -2543,6 +2582,8 @@ void WrappedVulkan::vkDestroyDebugReportCallbackEXT(VkInstance instance,
     m_ReportCallbacks.removeOne(user);
   }
 
+  if(GetResourceManager()->GuardActive())
+    VulkanHandleGuard::Get().Retire(user);
   delete user;
 }
 
@@ -2583,6 +2624,20 @@ struct ObjData
 static ObjData GetObjData(VkObjectType objType, uint64_t object)
 {
   ObjData ret = {};
+
+#if ENABLED(RDOC_ANDROID)
+  if(VulkanHandleGuard::Registry::IsToken(object))
+  {
+    VulkanHandleGuard::Snapshot snapshot;
+    if(!VulkanHandleGuard::Get().Inspect(object, snapshot))
+      return ret;
+    if(snapshot.type >= VulkanHandleGuard::DebugReport)
+    {
+      ret.unwrapped = snapshot.real;
+      return ret;
+    }
+  }
+#endif
 
   switch(objType)
   {
@@ -2751,6 +2806,18 @@ static ObjData GetObjData(VkDebugReportObjectTypeEXT objType, uint64_t object)
 
 ResourceId WrappedVulkan::GetIDForUserObject(void *object)
 {
+#if ENABLED(RDOC_ANDROID)
+  // [HANDLE-GUARD] Opaque non-dispatchable identities must never enter the pointer fallback.
+  if(VulkanHandleGuard::Registry::IsToken(uint64_t(uintptr_t(object))))
+  {
+    VulkanHandleGuard::Snapshot snapshot;
+    if(!VulkanHandleGuard::Get().Inspect(uint64_t(uintptr_t(object)), snapshot) ||
+       snapshot.type >= VulkanHandleGuard::DebugReport)
+      return ResourceId();
+    return ((WrappedVkNonDispRes *)snapshot.wrapper)->id;
+  }
+#endif
+
   VkResourceType type = TryIdentifyTypeByPtr((WrappedVkRes *)object);
 
   if(IsDispatchableRes(type))
@@ -3035,7 +3102,8 @@ VkResult WrappedVulkan::vkDebugMarkerSetObjectTagEXT(VkDevice device,
       rdcstr DebugPath = rdcstr((char *)pTagInfo->pTag, pTagInfo->tagSize);
 
       SCOPED_SERIALISE_CHUNK(VulkanChunk::SetShaderDebugPath);
-      Serialise_SetShaderDebugPath(ser, (VkShaderModule)(uint64_t)data.record->Resource, DebugPath);
+      Serialise_SetShaderDebugPath(ser, ToWrappedHandle<VkShaderModule>(data.record->Resource),
+                                   DebugPath);
       data.record->AddChunk(scope.Get());
     }
     else if(data.record && pTagInfo->tagName == VR_ThumbnailTag_UUID &&
@@ -3161,6 +3229,23 @@ VkResult WrappedVulkan::vkCreateDebugUtilsMessengerEXT(
   }
 
   *pMessenger = (VkDebugUtilsMessengerEXT)(uint64_t)user;
+  if(GetResourceManager()->GuardActive())
+  {
+    uint64_t handle = GetResourceManager()->RegisterSpecial(
+        uint64_t(instance), VulkanHandleGuard::DebugMessenger, uint64_t(user->realObject), user);
+    if(!handle)
+    {
+      ObjDisp(instance)->DestroyDebugUtilsMessengerEXT(Unwrap(instance), user->realObject, NULL);
+      {
+        SCOPED_LOCK(m_CallbacksLock);
+        m_UtilsCallbacks.removeOne(user);
+      }
+      delete user;
+      *pMessenger = VK_NULL_HANDLE;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    *pMessenger = VkDebugUtilsMessengerEXT(handle);
+  }
 
   return vkr;
 }
@@ -3172,8 +3257,11 @@ void WrappedVulkan::vkDestroyDebugUtilsMessengerEXT(VkInstance instance,
   if(messenger == VK_NULL_HANDLE)
     return;
 
-  UserDebugUtilsCallbackData *user =
-      (UserDebugUtilsCallbackData *)(uintptr_t)NON_DISP_TO_UINT64(messenger);
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(instance), VulkanHandleGuard::DebugMessenger,
+                                          uint64_t(messenger), snapshot, true))
+    return;
+  UserDebugUtilsCallbackData *user = (UserDebugUtilsCallbackData *)snapshot.wrapper;
 
   ObjDisp(instance)->DestroyDebugUtilsMessengerEXT(Unwrap(instance), user->realObject, NULL);
 
@@ -3182,6 +3270,8 @@ void WrappedVulkan::vkDestroyDebugUtilsMessengerEXT(VkInstance instance,
     m_UtilsCallbacks.removeOne(user);
   }
 
+  if(GetResourceManager()->GuardActive())
+    VulkanHandleGuard::Get().Retire(user);
   delete user;
 }
 
@@ -3283,7 +3373,8 @@ VkResult WrappedVulkan::vkSetDebugUtilsObjectTagEXT(VkDevice device,
       rdcstr DebugPath = rdcstr((char *)pTagInfo->pTag, pTagInfo->tagSize);
 
       SCOPED_SERIALISE_CHUNK(VulkanChunk::SetShaderDebugPath);
-      Serialise_SetShaderDebugPath(ser, (VkShaderModule)(uint64_t)data.record->Resource, DebugPath);
+      Serialise_SetShaderDebugPath(ser, ToWrappedHandle<VkShaderModule>(data.record->Resource),
+                                   DebugPath);
       data.record->AddChunk(scope.Get());
     }
     else if(data.record && pTagInfo->tagName == VR_ThumbnailTag_UUID &&
@@ -3369,20 +3460,54 @@ VkResult WrappedVulkan::vkCreatePrivateDataSlot(VkDevice device,
                                                 const VkAllocationCallbacks *,
                                                 VkPrivateDataSlot *pPrivateDataSlot)
 {
-  // don't even wrap the slot, keep it unwrapped since we don't care about it
-  return ObjDisp(device)->CreatePrivateDataSlot(Unwrap(device), pCreateInfo, NULL, pPrivateDataSlot);
+  VkResult ret =
+      ObjDisp(device)->CreatePrivateDataSlot(Unwrap(device), pCreateInfo, NULL, pPrivateDataSlot);
+  if(ret == VK_SUCCESS && GetResourceManager()->GuardActive())
+  {
+    uint64_t *holder = new(std::nothrow) uint64_t(uint64_t(*pPrivateDataSlot));
+    uint64_t handle =
+        holder ? GetResourceManager()->RegisterSpecial(
+                     uint64_t(device), VulkanHandleGuard::PrivateDataSlot, *holder, holder)
+               : 0;
+    if(!handle)
+    {
+      ObjDisp(device)->DestroyPrivateDataSlot(Unwrap(device), *pPrivateDataSlot, NULL);
+      delete holder;
+      *pPrivateDataSlot = VK_NULL_HANDLE;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    *pPrivateDataSlot = VkPrivateDataSlot(handle);
+  }
+  return ret;
 }
 
 void WrappedVulkan::vkDestroyPrivateDataSlot(VkDevice device, VkPrivateDataSlot privateDataSlot,
                                              const VkAllocationCallbacks *)
 {
-  return ObjDisp(device)->DestroyPrivateDataSlot(Unwrap(device), privateDataSlot, NULL);
+  if(privateDataSlot == VK_NULL_HANDLE)
+    return;
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::PrivateDataSlot,
+                                          uint64_t(privateDataSlot), snapshot, true))
+    return;
+  ObjDisp(device)->DestroyPrivateDataSlot(Unwrap(device), VkPrivateDataSlot(snapshot.real), NULL);
+  if(GetResourceManager()->GuardActive())
+  {
+    VulkanHandleGuard::Get().Retire(snapshot.wrapper);
+    delete(uint64_t *)snapshot.wrapper;
+  }
 }
 
 VkResult WrappedVulkan::vkSetPrivateData(VkDevice device, VkObjectType objectType,
                                          uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
                                          uint64_t data)
 {
+  VulkanHandleGuard::Snapshot slot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::PrivateDataSlot,
+                                          uint64_t(privateDataSlot), slot))
+    return VK_ERROR_VALIDATION_FAILED_EXT;
+  privateDataSlot = VkPrivateDataSlot(slot.real);
+
   ObjData objdata = GetObjData(objectType, objectHandle);
 
   return ObjDisp(device)->SetPrivateData(Unwrap(device), objectType, objdata.unwrapped,
@@ -3392,6 +3517,12 @@ VkResult WrappedVulkan::vkSetPrivateData(VkDevice device, VkObjectType objectTyp
 void WrappedVulkan::vkGetPrivateData(VkDevice device, VkObjectType objectType, uint64_t objectHandle,
                                      VkPrivateDataSlot privateDataSlot, uint64_t *pData)
 {
+  VulkanHandleGuard::Snapshot slot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::PrivateDataSlot,
+                                          uint64_t(privateDataSlot), slot))
+    return;
+  privateDataSlot = VkPrivateDataSlot(slot.real);
+
   ObjData objdata = GetObjData(objectType, objectHandle);
 
   return ObjDisp(device)->GetPrivateData(Unwrap(device), objectType, objdata.unwrapped,
@@ -3403,18 +3534,54 @@ void WrappedVulkan::vkGetPrivateData(VkDevice device, VkObjectType objectType, u
 VkResult WrappedVulkan::vkCreateDeferredOperationKHR(VkDevice device, const VkAllocationCallbacks *,
                                                      VkDeferredOperationKHR *pDeferredOperation)
 {
-  return ObjDisp(device)->CreateDeferredOperationKHR(Unwrap(device), NULL, pDeferredOperation);
+  VkResult ret =
+      ObjDisp(device)->CreateDeferredOperationKHR(Unwrap(device), NULL, pDeferredOperation);
+  if(ret == VK_SUCCESS && GetResourceManager()->GuardActive())
+  {
+    uint64_t *holder = new(std::nothrow) uint64_t(uint64_t(*pDeferredOperation));
+    uint64_t handle =
+        holder ? GetResourceManager()->RegisterSpecial(
+                     uint64_t(device), VulkanHandleGuard::DeferredOperation, *holder, holder)
+               : 0;
+    if(!handle)
+    {
+      ObjDisp(device)->DestroyDeferredOperationKHR(Unwrap(device), *pDeferredOperation, NULL);
+      delete holder;
+      *pDeferredOperation = VK_NULL_HANDLE;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    *pDeferredOperation = VkDeferredOperationKHR(handle);
+  }
+  return ret;
 }
 
 VkResult WrappedVulkan::vkDeferredOperationJoinKHR(VkDevice device, VkDeferredOperationKHR operation)
 {
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::DeferredOperation,
+                                          uint64_t(operation), snapshot))
+    return VK_ERROR_VALIDATION_FAILED_EXT;
+  operation = VkDeferredOperationKHR(snapshot.real);
+
   return ObjDisp(device)->DeferredOperationJoinKHR(Unwrap(device), operation);
 }
 
 void WrappedVulkan::vkDestroyDeferredOperationKHR(VkDevice device, VkDeferredOperationKHR operation,
                                                   const VkAllocationCallbacks *)
 {
-  return ObjDisp(device)->DestroyDeferredOperationKHR(Unwrap(device), operation, NULL);
+  if(operation == VK_NULL_HANDLE)
+    return;
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::DeferredOperation,
+                                          uint64_t(operation), snapshot, true))
+    return;
+  ObjDisp(device)->DestroyDeferredOperationKHR(Unwrap(device),
+                                               VkDeferredOperationKHR(snapshot.real), NULL);
+  if(GetResourceManager()->GuardActive())
+  {
+    VulkanHandleGuard::Get().Retire(snapshot.wrapper);
+    delete(uint64_t *)snapshot.wrapper;
+  }
 }
 
 INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkCreateSampler, VkDevice device,

@@ -1,0 +1,32 @@
+cmake_minimum_required(VERSION 3.10)
+project(vulkan_handle_guard_tests LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Threads REQUIRED)
+set(guard_src "${CMAKE_CURRENT_LIST_DIR}/..")
+
+foreach(target lifecycle benchmark)
+  if(target STREQUAL "lifecycle")
+    set(test_source vk_handle_guard_tests.cpp)
+  else()
+    set(test_source vk_handle_guard_benchmark.cpp)
+  endif()
+  add_executable(${target} "${guard_src}/vk_handle_guard.cpp" "${guard_src}/${test_source}")
+  target_compile_definitions(${target} PRIVATE VK_HANDLE_GUARD_STANDALONE)
+  target_link_libraries(${target} PRIVATE Threads::Threads)
+endforeach()
+
+# The standalone lifecycle test uses assertions, including in Release configurations.
+if(MSVC)
+  target_compile_options(lifecycle PRIVATE /UNDEBUG)
+else()
+  target_compile_options(lifecycle PRIVATE -UNDEBUG)
+endif()
+enable_testing()
+add_test(NAME lifecycle COMMAND lifecycle)
+
+if(ANDROID)
+  add_executable(integration "${guard_src}/vk_handle_guard_integration.cpp")
+  target_link_libraries(integration PRIVATE dl)
+endif()

@@ -1281,6 +1281,19 @@ VkResult WrappedVulkan::vkCreateCommandPool(VkDevice device,
 VkResult WrappedVulkan::vkResetCommandPool(VkDevice device, VkCommandPool cmdPool,
                                            VkCommandPoolResetFlags flags)
 {
+  if(!GetResourceManager()->ValidateHandle(device, cmdPool, true))
+    return VK_ERROR_VALIDATION_FAILED_EXT;
+  VkResult ret = GetResourceManager()->GuardActive()
+                     ? ObjDisp(device)->ResetCommandPool(Unwrap(device), Unwrap(cmdPool), flags)
+                     : VK_SUCCESS;
+  if(ret != VK_SUCCESS)
+  {
+    if(GetResourceManager()->GuardActive())
+      VulkanHandleGuard::Get().Cancel(uint64_t(cmdPool));
+    return ret;
+  }
+  // [HANDLE-GUARD] Command pool reset resets recording state, not command buffer identities.
+
   if(Vulkan_Debug_VerboseCommandRecording())
   {
     RDCLOG("Reset command pool %s", ToStr(GetResID(cmdPool)).c_str());
@@ -1299,12 +1312,19 @@ VkResult WrappedVulkan::vkResetCommandPool(VkDevice device, VkCommandPool cmdPoo
     poolRecord->UnlockChunks();
   }
 
+  if(GetResourceManager()->GuardActive())
+  {
+    VulkanHandleGuard::Get().Cancel(uint64_t(cmdPool));
+    return ret;
+  }
   return ObjDisp(device)->ResetCommandPool(Unwrap(device), Unwrap(cmdPool), flags);
 }
 
 void WrappedVulkan::vkTrimCommandPool(VkDevice device, VkCommandPool commandPool,
                                       VkCommandPoolTrimFlags flags)
 {
+  if(!GetResourceManager()->ValidateHandle(device, commandPool))
+    return;
   GetRecord(commandPool)->cmdPoolInfo->pool.Trim();
 
   return ObjDisp(device)->TrimCommandPool(Unwrap(device), Unwrap(commandPool), flags);
@@ -1381,7 +1401,8 @@ VkResult WrappedVulkan::vkAllocateCommandBuffers(VkDevice device,
       VkCommandBuffer unwrappedReal = pCommandBuffers[i];
 
       ResourceId id =
-          GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), pCommandBuffers[i]);
+          GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), pCommandBuffers[i],
+                                             uint64_t(Unwrap(pAllocateInfo->commandPool)));
 
       // we set this *after* wrapping, so that the wrapped resource copies the 'uninitialised'
       // loader table, since the loader expects to set the dispatch table onto an existing magic
@@ -1423,6 +1444,7 @@ VkResult WrappedVulkan::vkAllocateCommandBuffers(VkDevice device,
         record->bakedCommands = NULL;
 
         record->pool = GetRecord(pAllocateInfo->commandPool);
+        GetResourceManager()->GuardSetPool(pCommandBuffers[i], pAllocateInfo->commandPool);
         allocRecord->AddParent(record->pool);
 
         if(Vulkan_Debug_VerboseCommandRecording())

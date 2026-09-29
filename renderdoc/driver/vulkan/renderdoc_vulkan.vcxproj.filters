@@ -10,6 +10,12 @@
     <ClCompile Include="vk_debug.cpp">
       <Filter>Replay</Filter>
     </ClCompile>
+    <ClCompile Include="vk_handle_guard.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
+    <ClCompile Include="vk_handle_guard_tests.cpp">
+      <Filter>Util</Filter>
+    </ClCompile>
     <ClCompile Include="vk_resources.cpp">
       <Filter>Util</Filter>
     </ClCompile>
@@ -161,6 +167,9 @@
     </ClInclude>
     <ClInclude Include="vk_acceleration_structure.h">
       <Filter>Replay</Filter>
+    </ClInclude>
+    <ClInclude Include="vk_handle_guard.h">
+      <Filter>Util</Filter>
     </ClInclude>
     <ClInclude Include="vk_resources.h">
       <Filter>Util</Filter>

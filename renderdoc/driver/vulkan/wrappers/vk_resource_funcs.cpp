@@ -934,13 +934,16 @@ VkResult WrappedVulkan::vkAllocateMemory(VkDevice device, const VkMemoryAllocate
 
 void WrappedVulkan::vkFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks *)
 {
+  GuardedFreeMemory(device, memory, false);
+}
+
+void WrappedVulkan::GuardedFreeMemory(VkDevice device, VkDeviceMemory memory, bool deferred)
+{
   if(memory == VK_NULL_HANDLE)
     return;
 
-  // foreign handle: created before our layer chained in, so it has no wrapper and no record. Hand
-  // the free straight down to the driver - everything below dereferences memory as one of ours
-  // (wrapped->real, wrapped->record->hasBDA, wrapped->record->memMapState, ...).
-  if(!IS_OUR_WRAPPER(VkDeviceMemory, memory))
+  // [HANDLE-GUARD] Validate and claim before reading memory mapping/BDA bookkeeping.
+  if(!GetResourceManager()->BeginDestroy(device, memory, deferred))
   {
     FORWARD_OR_DROP_FOREIGN(FreeMemory, device, memory);
     return;
@@ -971,9 +974,11 @@ void WrappedVulkan::vkFreeMemory(VkDevice device, VkDeviceMemory memory, const V
     // opaque capture address isn't re-used before the capture completes
     {
       SCOPED_READLOCK(m_CapTransitionLock);
-      if(IsActiveCapturing(m_State) && wrapped->record->hasBDA)
+      if(!deferred && IsActiveCapturing(m_State) && wrapped->record->hasBDA)
       {
         SCOPED_LOCK(m_DeferredDestructLock);
+        if(GetResourceManager()->GuardActive())
+          VulkanHandleGuard::Get().Pending(uint64_t(memory));
         m_DeferredDestructResources.DeadMemories.push_back(memory);
         return;
       }

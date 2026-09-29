@@ -1,4 +1,7 @@
 set(sources
+    vk_handle_guard.cpp
+    vk_handle_guard.h
+    vk_handle_guard_tests.cpp
     vk_common.cpp
     vk_common.h
     vk_next_chains.cpp

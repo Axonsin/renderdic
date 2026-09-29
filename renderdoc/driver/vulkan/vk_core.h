@@ -1303,6 +1303,10 @@ private:
   VkResourceRecord *RegisterSurface(WindowingSystem system, void *handle);
 
 public:
+  void GuardedDestroyBuffer(VkDevice device, VkBuffer object, bool deferred);
+  void GuardedDestroyImage(VkDevice device, VkImage object, bool deferred);
+  void GuardedDestroyImageView(VkDevice device, VkImageView object, bool deferred);
+  void GuardedFreeMemory(VkDevice device, VkDeviceMemory object, bool deferred);
   WrappedVulkan();
   virtual ~WrappedVulkan();
 

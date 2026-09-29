@@ -1096,31 +1096,81 @@ VkResult WrappedVulkan::vkCreateValidationCacheEXT(VkDevice device,
                                                    const VkAllocationCallbacks *,
                                                    VkValidationCacheEXT *pValidationCache)
 {
-  return ObjDisp(device)->CreateValidationCacheEXT(Unwrap(device), pCreateInfo, NULL,
-                                                   pValidationCache);
+  VkResult ret =
+      ObjDisp(device)->CreateValidationCacheEXT(Unwrap(device), pCreateInfo, NULL, pValidationCache);
+  if(ret == VK_SUCCESS && GetResourceManager()->GuardActive())
+  {
+    uint64_t *holder = new(std::nothrow) uint64_t(uint64_t(*pValidationCache));
+    uint64_t handle =
+        holder ? GetResourceManager()->RegisterSpecial(
+                     uint64_t(device), VulkanHandleGuard::ValidationCache, *holder, holder)
+               : 0;
+    if(!handle)
+    {
+      ObjDisp(device)->DestroyValidationCacheEXT(Unwrap(device), *pValidationCache, NULL);
+      delete holder;
+      *pValidationCache = VK_NULL_HANDLE;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    *pValidationCache = VkValidationCacheEXT(handle);
+  }
+  return ret;
 }
 
 void WrappedVulkan::vkDestroyValidationCacheEXT(VkDevice device, VkValidationCacheEXT validationCache,
                                                 const VkAllocationCallbacks *)
 {
-  return ObjDisp(device)->DestroyValidationCacheEXT(Unwrap(device), validationCache, NULL);
+  if(validationCache == VK_NULL_HANDLE)
+    return;
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::ValidationCache,
+                                          uint64_t(validationCache), snapshot, true))
+    return;
+  ObjDisp(device)->DestroyValidationCacheEXT(Unwrap(device), VkValidationCacheEXT(snapshot.real),
+                                             NULL);
+  if(GetResourceManager()->GuardActive())
+  {
+    VulkanHandleGuard::Get().Retire(snapshot.wrapper);
+    delete(uint64_t *)snapshot.wrapper;
+  }
 }
 
 VkResult WrappedVulkan::vkMergeValidationCachesEXT(VkDevice device, VkValidationCacheEXT dstCache,
                                                    uint32_t srcCacheCount,
                                                    const VkValidationCacheEXT *pSrcCaches)
 {
-  return ObjDisp(device)->MergeValidationCachesEXT(Unwrap(device), dstCache, srcCacheCount,
-                                                   pSrcCaches);
+  if(!GetResourceManager()->GuardActive())
+    return ObjDisp(device)->MergeValidationCachesEXT(Unwrap(device), dstCache, srcCacheCount,
+                                                     pSrcCaches);
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::ValidationCache,
+                                          uint64_t(dstCache), snapshot) ||
+     (srcCacheCount && !pSrcCaches))
+    return VK_ERROR_VALIDATION_FAILED_EXT;
+  dstCache = VkValidationCacheEXT(snapshot.real);
+  VkValidationCacheEXT *sources = GetTempArray<VkValidationCacheEXT>(srcCacheCount);
+  for(uint32_t i = 0; i < srcCacheCount; ++i)
+  {
+    if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::ValidationCache,
+                                            uint64_t(pSrcCaches[i]), snapshot))
+      return VK_ERROR_VALIDATION_FAILED_EXT;
+    sources[i] = VkValidationCacheEXT(snapshot.real);
+  }
+  return ObjDisp(device)->MergeValidationCachesEXT(Unwrap(device), dstCache, srcCacheCount, sources);
 }
 
 VkResult WrappedVulkan::vkGetValidationCacheDataEXT(VkDevice device,
                                                     VkValidationCacheEXT validationCache,
                                                     size_t *pDataSize, void *pData)
 {
-  return ObjDisp(device)->GetValidationCacheDataEXT(Unwrap(device), validationCache, pDataSize,
-                                                    pData);
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::ValidationCache,
+                                          uint64_t(validationCache), snapshot))
+    return VK_ERROR_VALIDATION_FAILED_EXT;
+  return ObjDisp(device)->GetValidationCacheDataEXT(
+      Unwrap(device), VkValidationCacheEXT(snapshot.real), pDataSize, pData);
 }
+
 void WrappedVulkan::vkGetPhysicalDeviceMultisamplePropertiesEXT(
     VkPhysicalDevice physicalDevice, VkSampleCountFlagBits samples,
     VkMultisamplePropertiesEXT *pMultisampleProperties)
@@ -1333,12 +1383,24 @@ VkResult WrappedVulkan::vkGetPhysicalDeviceFragmentShadingRatesKHR(
 uint32_t WrappedVulkan::vkGetDeferredOperationMaxConcurrencyKHR(VkDevice device,
                                                                 VkDeferredOperationKHR operation)
 {
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::DeferredOperation,
+                                          uint64_t(operation), snapshot))
+    return 0;
+  operation = VkDeferredOperationKHR(snapshot.real);
+
   return ObjDisp(device)->GetDeferredOperationMaxConcurrencyKHR(Unwrap(device), operation);
 }
 
 VkResult WrappedVulkan::vkGetDeferredOperationResultKHR(VkDevice device,
                                                         VkDeferredOperationKHR operation)
 {
+  VulkanHandleGuard::Snapshot snapshot;
+  if(!GetResourceManager()->SpecialHandle(uint64_t(device), VulkanHandleGuard::DeferredOperation,
+                                          uint64_t(operation), snapshot))
+    return VK_ERROR_VALIDATION_FAILED_EXT;
+  operation = VkDeferredOperationKHR(snapshot.real);
+
   return ObjDisp(device)->GetDeferredOperationResultKHR(Unwrap(device), operation);
 }
 

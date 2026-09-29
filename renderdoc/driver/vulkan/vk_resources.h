@@ -31,6 +31,7 @@
 #include "core/sparse_page_table.h"
 #include "vk_common.h"
 #include "vk_dispatch_defs.h"
+#include "vk_handle_guard.h"
 #include "vk_hookset_defs.h"
 
 namespace Threading
@@ -651,27 +652,63 @@ struct UnwrapHelper
     }                                                     \
   };
 
-#define UNWRAP_NONDISP_HELPER(vulkantype)                     \
-  template <>                                                 \
-  struct UnwrapHelper<vulkantype>                             \
-  {                                                           \
-    typedef WrappedVkNonDispRes ParentType;                   \
-    enum                                                      \
-    {                                                         \
-      DispatchableType = 0                                    \
-    };                                                        \
-    typedef CONCAT(Wrapped, vulkantype) Outer;                \
-    static TypedRealHandle ToTypedHandle(vulkantype real)     \
-    {                                                         \
-      TypedRealHandle h;                                      \
-      h.type = (VkResourceType)Outer::TypeEnum;               \
-      h.real = RealVkRes(NON_DISP_TO_UINT64(real));           \
-      return h;                                               \
-    }                                                         \
-    static Outer *FromHandle(vulkantype wrapped)              \
-    {                                                         \
-      return (Outer *)(uintptr_t)NON_DISP_TO_UINT64(wrapped); \
-    }                                                         \
+// [HANDLE-GUARD] Only Android capture publishes tokens. Replay and other platforms keep
+// pointer handles; trusted internal wrapper pointers must use WrappedHandleValue on conversion.
+inline void *ResolveNonDispatchable(uint64_t handle, uint32_t type)
+{
+#if ENABLED(RDOC_ANDROID)
+  if(VulkanHandleGuard::Registry::IsToken(handle))
+    return VulkanHandleGuard::Get().Resolve(handle, type);
+#endif
+  return (void *)(uintptr_t)handle;
+}
+
+inline VkValidationCacheEXT UnwrapValidationCache(VkValidationCacheEXT cache)
+{
+#if ENABLED(RDOC_ANDROID)
+  if(VulkanHandleGuard::Registry::IsToken(uint64_t(cache)))
+  {
+    VulkanHandleGuard::Snapshot snapshot;
+    if(VulkanHandleGuard::Get().Inspect(uint64_t(cache), snapshot) &&
+       snapshot.type == VulkanHandleGuard::ValidationCache)
+      return VkValidationCacheEXT(snapshot.real);
+    return VK_NULL_HANDLE;
+  }
+#endif
+  return cache;
+}
+
+inline uint64_t WrappedHandleValue(WrappedVkRes *wrapper)
+{
+#if ENABLED(RDOC_ANDROID)
+  uint64_t token = VulkanHandleGuard::Get().PublicHandle(wrapper);
+  if(token)
+    return token;
+#endif
+  return uint64_t(uintptr_t(wrapper));
+}
+
+#define UNWRAP_NONDISP_HELPER(vulkantype)                                                   \
+  template <>                                                                               \
+  struct UnwrapHelper<vulkantype>                                                           \
+  {                                                                                         \
+    typedef WrappedVkNonDispRes ParentType;                                                 \
+    enum                                                                                    \
+    {                                                                                       \
+      DispatchableType = 0                                                                  \
+    };                                                                                      \
+    typedef CONCAT(Wrapped, vulkantype) Outer;                                              \
+    static TypedRealHandle ToTypedHandle(vulkantype real)                                   \
+    {                                                                                       \
+      TypedRealHandle h;                                                                    \
+      h.type = (VkResourceType)Outer::TypeEnum;                                             \
+      h.real = RealVkRes(NON_DISP_TO_UINT64(real));                                         \
+      return h;                                                                             \
+    }                                                                                       \
+    static Outer *FromHandle(vulkantype wrapped)                                            \
+    {                                                                                       \
+      return (Outer *)ResolveNonDispatchable(NON_DISP_TO_UINT64(wrapped), Outer::TypeEnum); \
+    }                                                                                       \
   };
 
 UNWRAP_HELPER(VkInstance)
@@ -792,7 +829,8 @@ ResourceId GetResID(RealType obj)
   if(obj == VK_NULL_HANDLE)
     return ResourceId();
 
-  return GetWrapped(obj)->id;
+  auto *wrapped = GetWrapped(obj);
+  return wrapped ? wrapped->id : ResourceId();
 }
 
 template <typename RealType>
@@ -801,7 +839,8 @@ VkResourceRecord *GetRecord(RealType obj)
   if(obj == VK_NULL_HANDLE)
     return NULL;
 
-  return GetWrapped(obj)->record;
+  auto *wrapped = GetWrapped(obj);
+  return wrapped ? wrapped->record : NULL;
 }
 
 template <typename RealType>
@@ -815,7 +854,7 @@ RealType ToUnwrappedHandle(WrappedVkRes *ptr)
 template <typename RealType>
 RealType ToWrappedHandle(WrappedVkRes *ptr)
 {
-  return RealType(uint64_t(ptr));
+  return RealType(WrappedHandleValue(ptr));
 }
 
 template <typename RealType>
@@ -902,54 +941,16 @@ void NTECreateCaller(VkDevice device, T obj, void *caller)
 #endif
 
 // ---------------------------------------------------------------------------------------------
-// TODO(NTE-FRAMEGEN-STALE-HANDLE): diagnosed 2026-09-30; SDK initialization bug, not
-// delayed destruction. Retain the guards as a compatibility mitigation, NOT a complete fix.
-//
-// On NTE / Adreno 830, libframeestimationVK.so (SHA-256
-// 4a3b1af65a6c14dffcf28f453abf61928e79d10ea9d0523b03eba640a97a1963) logs
-// "UnSupported vkCreateOpticalFlowSessionNV", then "Init resource failed". Init's failure
-// cleanup calls DestroyResources (Init return offset 0x2911c). The constructor does not
-// initialize numerous handle members which that cleanup reads. Offline ARM64 execution of
-// the constructor on an 0xa5-filled object leaves all 19 observed fields untouched.
-//
-// Two uncapped lifecycle/caller audits, injectfrom=1 and =2 respectively, found:
-//   - 19 non-null destroys from DestroyResources: 2 Pipeline, 1 PipelineLayout,
-//     8 DescriptorPool, 8 DescriptorSetLayout. All fail the expected-type pool test.
-//   - 9 drops: Pipeline this+0x7e8 (0x3e954d9 / 0xcaf65c66), PipelineLayout +0x7e0
-//     (0xaffffffff), DescriptorPool +0x308/+0x468 (0x5), DescriptorSetLayout +0x310
-//     (0x1bffffffff), +0x3b8/+0x620/+0x7d8 (0x5), +0x470 (0x3100000009).
-//   - No matching earlier wrapper OR real handle among the four audited resource types;
-//     no create caller from frameestimation for these types. InitResources fails before
-//     InitPiplines is reached. These drops do not withhold destruction of created objects:
-//     attributable leaked objects = 0 (not a measurement of total process/driver memory).
-//   - The other 10 uninitialized values pass the address heuristic and are forwarded.
-//     A pointer-shaped garbage value is NOT thereby validated as a real driver handle.
-//   - Skipping the probe instance preserves the failure path/counts. 0xcaf65c66 also
-//     reproduces in the same uninitialized field; there is no evidence of a deliberate canary.
-//
-// This supersedes the old claims of proven cross-instance/stale-wrapper ownership and
-// "each drop leaks an object". "Wrong pool" proves only nonmembership in that type's pool.
-// Likewise, absence from layer creation logs alone cannot rule out unlayered driver objects.
-// The diagnosis above also relies on caller offsets, failure control flow and constructor
-// execution. Full evidence, field table, audit scripts and capture results are in
-// KSU_renderdochider/docs/NTE_HANDLE_AUDIT_2026-09-30.md and docs/RUNBOOK.md.
-//
-// Root repair belongs in the SDK: initialize ALL handle members to VK_NULL_HANDLE, clean
-// up only successfully initialized resources, and clear them on release. We cannot safely
-// reconstruct an arbitrary original handle from garbage, or forward unsupported optical-flow
-// entry points with wrapped arguments. Changing the wrapper pool/instance injection cannot
-// repair these uninitialized SDK fields. No SDK binary patch is deployed here.
-//
-// Remaining general guard limitations: IsMember checks range/alignment, not slot liveness
-// or owning device; recycled addresses can alias live wrappers. Adding liveness alone must
-// NOT send freed wrapper addresses through the raw-driver fallback. Global pools do not
-// encode owner device. Any future provenance fix needs separate wrapper/raw/tombstone paths
-// and normal capture/replay validation, not merely a stronger predicate plus this fallback.
-// NTE-DIAG: set NTE_HANDLE_DIAGNOSTICS=1 above only for an unstripped diagnostic build;
-// restore 0 afterwards. The audit is uncapped and can produce large logs.
+// [HANDLE-GUARD] NTE-FRAMEGEN-STALE-HANDLE: the SDK's failed initialization cleans up 19
+// uninitialized handle fields (audit: KSU_renderdochider/docs/NTE_HANDLE_AUDIT_2026-09-30.md).
+// A pointer-shaped value is not evidence of a valid driver object. Android capture now uses
+// vk_handle_guard identities and rejects unknown values by default. The explicit compatibility
+// property only restores the old heuristic for unknown values outside every wrapper arena.
+// This contains invalid cleanup; it does not repair the SDK or implement optical flow.
+// NTE_HANDLE_DIAGNOSTICS remains an optional, uncapped forensic probe, disabled in shipping builds.
 // ---------------------------------------------------------------------------------------------
 // Exact slot boundary in the expected type's pool. This is NOT a liveness/ownership check.
-#define IS_OUR_WRAPPER(type, obj) (CONCAT(Wrapped, type)::IsMember((const void *)(obj)))
+#define IS_OUR_WRAPPER(type, obj) (CONCAT(Wrapped, type)::IsMember(GetWrapped(obj)))
 
 // Compatibility heuristic for the observed Android/Adreno failure, not a Vulkan guarantee.
 // Non-dispatchable handles are opaque: alignment/size does not prove validity or ownership.
@@ -960,15 +961,15 @@ static inline bool IsPlausibleDriverHandle(const void *obj)
   return (value & (uintptr_t)7) == 0 && value > (uintptr_t)0xffffffff;
 }
 
-// Hand a handle that is not one of our wrappers to the driver, but only when it could be a handle at
-// all - a raw handle created before our layer chained in must still be destroyed, garbage must not.
-#define FORWARD_OR_DROP_FOREIGN(func, device, obj)                     \
-  do                                                                   \
-  {                                                                    \
-    if(IsPlausibleDriverHandle((const void *)(obj)))                   \
-      ObjDisp(device)->func(Unwrap(device), (obj), NULL);              \
-    else                                                               \
-      RDCWARN(#func ": dropping implausible handle %p", (void *)(obj)); \
+// [HANDLE-GUARD] Only the explicitly enabled legacy path may forward unknown raw handles.
+// BeginDestroy already logged the rejection/forward reason with a bounded counter.
+#define FORWARD_OR_DROP_FOREIGN(func, device, obj)        \
+  do                                                      \
+  {                                                       \
+    if(GetResourceManager()->CanForwardForeign(obj))      \
+      ObjDisp(device)->func(Unwrap(device), (obj), NULL); \
+    else                                                  \
+      (void)0;                                            \
   } while(0)
 
 #define UNKNOWN_PREV_IMG_LAYOUT ((VkImageLayout)0xffffffff)

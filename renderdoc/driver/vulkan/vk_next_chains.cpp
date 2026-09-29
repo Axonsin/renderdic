@@ -907,8 +907,9 @@ static void AppendModifiedChainedStruct(byte *&tempMem, VkStruct *outputStruct,
   COPY_STRUCT_CAPTURE_ONLY(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_FENCE_INFO,                     \
                            VkPhysicalDeviceExternalFenceInfo);                                        \
   COPY_STRUCT_CAPTURE_ONLY(VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO, VkProtectedSubmitInfo);           \
-  COPY_STRUCT_CAPTURE_ONLY(VK_STRUCTURE_TYPE_SHADER_MODULE_VALIDATION_CACHE_CREATE_INFO_EXT,          \
-                           VkShaderModuleValidationCacheCreateInfoEXT);                               \
+  UNWRAP_STRUCT_CAPTURE_ONLY(VK_STRUCTURE_TYPE_SHADER_MODULE_VALIDATION_CACHE_CREATE_INFO_EXT,        \
+      VkShaderModuleValidationCacheCreateInfoEXT,                                                    \
+      out->validationCache = UnwrapValidationCache(out->validationCache));                            \
   COPY_STRUCT_CAPTURE_ONLY(VK_STRUCTURE_TYPE_SWAPCHAIN_COUNTER_CREATE_INFO_EXT,                       \
                            VkSwapchainCounterCreateInfoEXT);                                          \
   COPY_STRUCT_CAPTURE_ONLY(VK_STRUCTURE_TYPE_VALIDATION_FLAGS_EXT, VkValidationFlagsEXT);             \

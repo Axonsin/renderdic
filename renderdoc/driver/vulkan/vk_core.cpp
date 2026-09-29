@@ -3422,16 +3422,19 @@ bool WrappedVulkan::EndFrameCapture(DeviceOwnedWindow devWnd)
   GetResourceManager()->FreeInitialContents();
 
   for(VkDeviceMemory m : DeadMemories)
-    vkFreeMemory(m_Device, m, NULL);
+    GuardedFreeMemory(m_Device, m, true);
 
   for(VkBuffer b : DeadBuffers)
-    vkDestroyBuffer(m_Device, b, NULL);
+    GuardedDestroyBuffer(m_Device, b, true);
 
   for(VkImage i : DeadImages)
-    vkDestroyImage(m_Device, i, NULL);
+    GuardedDestroyImage(m_Device, i, true);
 
   for(VkImageView v : DeadImageViews)
-    vkDestroyImageView(m_Device, v, NULL);
+    GuardedDestroyImageView(m_Device, v, true);
+
+  if(GetResourceManager()->GuardActive())
+    VulkanHandleGuard::ReportSummary();
 
   for(ResourceId id : DeadImageStates)
     EraseImageState(id);
@@ -3516,16 +3519,19 @@ bool WrappedVulkan::DiscardFrameCapture(DeviceOwnedWindow devWnd)
   }
 
   for(VkDeviceMemory m : DeadMemories)
-    vkFreeMemory(m_Device, m, NULL);
+    GuardedFreeMemory(m_Device, m, true);
 
   for(VkBuffer b : DeadBuffers)
-    vkDestroyBuffer(m_Device, b, NULL);
+    GuardedDestroyBuffer(m_Device, b, true);
 
   for(VkImage i : DeadImages)
-    vkDestroyImage(m_Device, i, NULL);
+    GuardedDestroyImage(m_Device, i, true);
 
   for(VkImageView v : DeadImageViews)
-    vkDestroyImageView(m_Device, v, NULL);
+    GuardedDestroyImageView(m_Device, v, true);
+
+  if(GetResourceManager()->GuardActive())
+    VulkanHandleGuard::ReportSummary();
 
   for(VkDeviceMemory m : DeadInternalMemories)
   {

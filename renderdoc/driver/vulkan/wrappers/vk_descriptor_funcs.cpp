@@ -2111,6 +2111,8 @@ VkResult WrappedVulkan::vkAllocateDescriptorSets(VkDevice device,
     else
       id = GetResourceManager()->WrapResource(ResourceId(), Unwrap(device), pDescriptorSets[i]);
 
+    GetResourceManager()->GuardSetPool(pDescriptorSets[i], pAllocateInfo->descriptorPool);
+
     if(IsCaptureMode(m_State))
     {
       if(record == NULL)
@@ -2182,25 +2184,47 @@ VkResult WrappedVulkan::vkAllocateDescriptorSets(VkDevice device,
 VkResult WrappedVulkan::vkFreeDescriptorSets(VkDevice device, VkDescriptorPool descriptorPool,
                                              uint32_t count, const VkDescriptorSet *pDescriptorSets)
 {
+  if(!GetResourceManager()->BeginFreeBatch(device, descriptorPool, count, pDescriptorSets))
+    return VK_ERROR_VALIDATION_FAILED_EXT;
+
   VkDescriptorSet *unwrapped = GetTempArray<VkDescriptorSet>(count);
   for(uint32_t i = 0; i < count; i++)
     unwrapped[i] = Unwrap(pDescriptorSets[i]);
 
-  for(uint32_t i = 0; i < count; i++)
+  if(!GetResourceManager()->GuardActive())
   {
-    if(pDescriptorSets[i] != VK_NULL_HANDLE)
-      GetResourceManager()->ReleaseWrappedResource(pDescriptorSets[i]);
+    // Preserve replay/desktop ordering, including their real-handle wrapper map.
+    for(uint32_t i = 0; i < count; ++i)
+      if(pDescriptorSets[i] != VK_NULL_HANDLE)
+        GetResourceManager()->ReleaseWrappedResource(pDescriptorSets[i]);
+    return ObjDisp(device)->FreeDescriptorSets(Unwrap(device), Unwrap(descriptorPool), count,
+                                               unwrapped);
   }
 
+  // [HANDLE-GUARD] Commit bookkeeping only after a successful driver free. Claimed identities
+  // cannot be freed twice while the registry lock is released around the driver call.
   VkResult ret =
       ObjDisp(device)->FreeDescriptorSets(Unwrap(device), Unwrap(descriptorPool), count, unwrapped);
-
+  for(uint32_t i = 0; i < count; ++i)
+  {
+    if(pDescriptorSets[i] == VK_NULL_HANDLE)
+      continue;
+    if(ret == VK_SUCCESS)
+      GetResourceManager()->ReleaseWrappedResource(pDescriptorSets[i]);
+    else if(GetResourceManager()->GuardActive())
+      VulkanHandleGuard::Get().Cancel(uint64_t(pDescriptorSets[i]));
+  }
   return ret;
 }
 
 VkResult WrappedVulkan::vkResetDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool,
                                               VkDescriptorPoolResetFlags flags)
 {
+  if(!GetResourceManager()->ValidateHandle(device, descriptorPool, true))
+    return VK_ERROR_VALIDATION_FAILED_EXT;
+  // [HANDLE-GUARD] A failed reset must not orphan live descriptors or populate the reuse list.
+  VkResult ret = VK_SUCCESS;
+
   // need to free all child descriptor pools. Application is responsible for
   // ensuring no concurrent use with alloc/free from this pool, the same as
   // for DestroyDescriptorPool.
@@ -2209,6 +2233,15 @@ VkResult WrappedVulkan::vkResetDescriptorPool(VkDevice device, VkDescriptorPool 
     // reuse a record we might be preparing. We do this here rather than in vkAllocateDescriptorSets
     // where we actually modify the record, since that's much higher frequency
     SCOPED_READLOCK(m_CapTransitionLock);
+    if(GetResourceManager()->GuardActive())
+    {
+      ret = ObjDisp(device)->ResetDescriptorPool(Unwrap(device), Unwrap(descriptorPool), flags);
+      if(ret != VK_SUCCESS)
+      {
+        VulkanHandleGuard::Get().Cancel(uint64_t(descriptorPool));
+        return ret;
+      }
+    }
 
     if(IsCaptureMode(m_State))
     {
@@ -2218,6 +2251,9 @@ VkResult WrappedVulkan::vkResetDescriptorPool(VkDevice device, VkDescriptorPool 
       {
         for(auto it = record->pooledChildren.begin(); it != record->pooledChildren.end(); ++it)
         {
+          // [HANDLE-GUARD] Keep the record for reuse but revoke the old public identity.
+          if(GetResourceManager()->GuardActive())
+            VulkanHandleGuard::Get().Dormant(WrappedHandleValue((*it)->Resource));
           ((WrappedVkNonDispRes *)(*it)->Resource)->real = RealVkRes(0x123456);
           (*it)->descInfo->data.reset();
         }
@@ -2238,8 +2274,8 @@ VkResult WrappedVulkan::vkResetDescriptorPool(VkDevice device, VkDescriptorPool 
         {
           // unset record->pool so we don't recurse
           (*it)->pool = NULL;
-          GetResourceManager()->ReleaseWrappedResource((VkDescriptorSet)(uint64_t)(*it)->Resource,
-                                                       true);
+          GetResourceManager()->ReleaseWrappedResource(
+              ToWrappedHandle<VkDescriptorSet>((*it)->Resource), true);
         }
 
         record->pooledChildren.clear();
@@ -2247,6 +2283,11 @@ VkResult WrappedVulkan::vkResetDescriptorPool(VkDevice device, VkDescriptorPool 
     }
   }
 
+  if(GetResourceManager()->GuardActive())
+  {
+    VulkanHandleGuard::Get().Cancel(uint64_t(descriptorPool));
+    return ret;
+  }
   return ObjDisp(device)->ResetDescriptorPool(Unwrap(device), Unwrap(descriptorPool), flags);
 }
 

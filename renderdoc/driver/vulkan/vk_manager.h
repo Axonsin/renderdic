@@ -169,10 +169,19 @@ public:
   VulkanResourceManager(CaptureState &state, WrappedVulkan *core)
       : ResourceManager(state), m_Core(core)
   {
+    if(GuardActive())
+      VulkanHandleGuard::AllowForeignDestroy();
   }
   void SetState(CaptureState state) { m_State = state; }
   CaptureState GetState() { return m_State; }
-  ~VulkanResourceManager() {}
+  ~VulkanResourceManager()
+  {
+    if(GuardActive())
+    {
+      VulkanHandleGuard::ReportSummary();
+      VulkanHandleGuard::Get().RetireManager(this);
+    }
+  }
   void ClearWithoutReleasing()
   {
     // if any objects leaked past, it's no longer safe to delete them as we would
@@ -212,8 +221,7 @@ public:
   template <typename realtype>
   realtype GetHandle(ResourceId id)
   {
-    return realtype(
-        (uint64_t)((typename UnwrapHelper<realtype>::ParentType *)ResourceManager::GetResource(id)));
+    return ToWrappedHandle<realtype>(ResourceManager::GetResource(id));
   }
 
   // handling memory & image layouts
@@ -276,7 +284,8 @@ public:
   }
 
   template <typename parenttype, typename realtype>
-  ResourceId WrapResource(ResourceId id, parenttype parentObj, realtype &obj)
+  ResourceId WrapResource(ResourceId id, parenttype parentObj, realtype &obj,
+                          uint64_t allocationPool = 0, bool ownsObject = true)
   {
     RDCASSERT(obj != VK_NULL_HANDLE);
 
@@ -304,7 +313,32 @@ public:
              (int)ToTypedHandle(obj).type, this, (void *)parentObj, wrapped, (void *)obj,
              ToStr(id).c_str());
 #endif
-    obj = realtype((uint64_t)wrapped);
+    // [HANDLE-GUARD] Register before exposing any handle to the application. Raw dispatch
+    // parents are resolved within this manager, never by globally comparing driver addresses.
+    if(GuardActive())
+    {
+      auto &guard = VulkanHandleGuard::Get();
+      uint64_t owner =
+          guard.Parent(this, UnwrapHelper<parenttype>::Outer::TypeEnum, uint64_t(parentObj));
+      uint64_t handle = guard.Register(wrapped, UnwrapHelper<realtype>::Outer::TypeEnum,
+                                       uint64_t(obj), owner, this, IsDispatchable(obj));
+      if(!handle)
+      {
+        // [HANDLE-GUARD] Never publish a raw handle on identity exhaustion. Like RenderDoc's
+        // wrapper allocator, an unrecoverable host allocation failure terminates capture/process.
+        // Release the new driver object first, using its actual parent (not m_Device).
+        GuardRegistrationFailed(UnwrapHelper<realtype>::Outer::TypeEnum, uint64_t(obj),
+                                UnwrapHelper<parenttype>::Outer::TypeEnum, uint64_t(parentObj),
+                                allocationPool, ownsObject);
+        ResourceManager::ReleaseResource(id);
+        delete wrapped;
+        obj = VK_NULL_HANDLE;
+        RDCFATAL("[HANDLE-GUARD] Cannot register Vulkan resource identity");
+      }
+      obj = realtype(handle);
+    }
+    else
+      obj = realtype((uint64_t)wrapped);
 
     return id;
   }
@@ -318,7 +352,16 @@ public:
         (typename UnwrapHelper<realtype>::Outer *)record->Resource;
     wrapped->real = ToTypedHandle(obj).real;
 
-    obj = realtype((uint64_t)wrapped);
+    // [HANDLE-GUARD] A retained descriptor record is not a retained application identity.
+    if(GuardActive())
+    {
+      uint64_t handle = VulkanHandleGuard::Get().Renew(wrapped, uint64_t(obj));
+      if(!handle)
+        RDCFATAL("[HANDLE-GUARD] Cannot renew descriptor identity");
+      obj = realtype(handle);
+    }
+    else
+      obj = realtype((uint64_t)wrapped);
 
     return wrapped->id;
   }
@@ -372,16 +415,137 @@ public:
     }
   }
 
+  void GuardRegistrationFailed(uint32_t type, uint64_t real, uint32_t parentType, uint64_t parent,
+                               uint64_t allocationPool, bool ownsObject);
+
+  bool GuardActive() const { return ENABLED(RDOC_ANDROID) && IsCaptureMode(m_State); }
+
+  uint64_t RegisterSpecial(uint64_t parent, uint32_t type, uint64_t real, void *wrapper)
+  {
+    if(!GuardActive())
+      return real;
+    return VulkanHandleGuard::Get().Register(
+        wrapper, type, real, VulkanHandleGuard::Get().Identity(parent), this, false);
+  }
+
+  bool SpecialHandle(uint64_t parent, uint32_t type, uint64_t handle,
+                     VulkanHandleGuard::Snapshot &snapshot, bool destroy = false)
+  {
+    if(!GuardActive())
+    {
+      snapshot.real = handle;
+      snapshot.wrapper = (void *)(uintptr_t)handle;
+      return true;
+    }
+    VulkanHandleGuard::Check check;
+    check.handle = handle;
+    check.type = type;
+    check.owner = VulkanHandleGuard::Get().Identity(parent);
+    auto reason =
+        destroy ? VulkanHandleGuard::Get().Claim(check) : VulkanHandleGuard::Get().Validate(check);
+    if(reason != VulkanHandleGuard::Reason::Valid)
+    {
+      VulkanHandleGuard::Report(type, reason, handle);
+      return false;
+    }
+    return VulkanHandleGuard::Get().Inspect(handle, snapshot);
+  }
+
+  template <typename Parent, typename Object>
+  VulkanHandleGuard::Check GuardCheck(Parent parent, Object object, uint64_t pool = 0)
+  {
+    VulkanHandleGuard::Check check;
+    check.handle = uint64_t(object);
+    check.type = UnwrapHelper<Object>::Outer::TypeEnum;
+    check.owner = VulkanHandleGuard::Get().Identity(uint64_t(parent));
+    check.pool = pool;
+    return check;
+  }
+
+  template <typename Parent, typename Object>
+  bool BeginDestroy(Parent parent, Object object, bool deferred = false)
+  {
+    if(!GuardActive())
+      return UnwrapHelper<Object>::Outer::IsMember((const void *)(uintptr_t)object);
+    auto check = GuardCheck(parent, object);
+    auto reason = VulkanHandleGuard::Get().Claim(check, deferred);
+    if(reason != VulkanHandleGuard::Reason::Valid)
+      VulkanHandleGuard::Report(
+          check.type, CanForwardForeign(object) ? VulkanHandleGuard::Reason::LegacyForward : reason,
+          check.handle);
+    return reason == VulkanHandleGuard::Reason::Valid;
+  }
+
+  template <typename Object>
+  bool CanForwardForeign(Object object)
+  {
+    if(!GuardActive())
+      return IsPlausibleDriverHandle((const void *)(uintptr_t)object);
+    // [HANDLE-GUARD] Compatibility never forwards a token, a live wrapper, or any address
+    // in our wrapper arenas (including freed slots and interior pointers).
+    return VulkanHandleGuard::MayForward(uint64_t(object), VulkanHandleGuard::AllowForeignDestroy(),
+                                         VulkanHandleGuard::Get().Known(uint64_t(object)),
+                                         IsWrappedHandle((WrappedVkRes *)(uintptr_t)object));
+  }
+
+  template <typename Parent, typename Object>
+  bool ValidateHandle(Parent parent, Object object, bool claim = false)
+  {
+    if(!GuardActive())
+      return true;
+    auto check = GuardCheck(parent, object);
+    auto reason =
+        claim ? VulkanHandleGuard::Get().Claim(check) : VulkanHandleGuard::Get().Validate(check);
+    if(reason != VulkanHandleGuard::Reason::Valid)
+      VulkanHandleGuard::Report(check.type, reason, check.handle);
+    return reason == VulkanHandleGuard::Reason::Valid;
+  }
+
+  template <typename Parent, typename Pool, typename Object>
+  bool BeginFreeBatch(Parent parent, Pool pool, uint32_t count, const Object *objects)
+  {
+    if(!GuardActive())
+      return true;
+    if(!ValidateHandle(parent, pool))
+      return false;
+    if(count && !objects)
+    {
+      VulkanHandleGuard::Report(UnwrapHelper<Object>::Outer::TypeEnum,
+                                VulkanHandleGuard::Reason::BadArray, 0);
+      return false;
+    }
+    std::vector<VulkanHandleGuard::Check> checks;
+    checks.reserve(count);
+    uint64_t poolId = VulkanHandleGuard::Get().Identity(uint64_t(pool));
+    for(uint32_t i = 0; i < count; ++i)
+      if(objects[i] != VK_NULL_HANDLE)
+        checks.push_back(GuardCheck(parent, objects[i], poolId));
+    // [HANDLE-GUARD] Validate the entire batch before claiming any member. No partial frees.
+    auto reason = VulkanHandleGuard::Get().ClaimBatch(checks);
+    if(reason != VulkanHandleGuard::Reason::Valid)
+      VulkanHandleGuard::Report(UnwrapHelper<Object>::Outer::TypeEnum, reason, uint64_t(pool));
+    return reason == VulkanHandleGuard::Reason::Valid;
+  }
+
+  template <typename Object, typename Pool>
+  void GuardSetPool(Object object, Pool pool, bool borrowed = false)
+  {
+    if(GuardActive())
+      VulkanHandleGuard::Get().SetPool(uint64_t(object),
+                                       VulkanHandleGuard::Get().Identity(uint64_t(pool)), borrowed);
+  }
+
   void RemoveAnnotations(ResourceId id);
 
   template <typename realtype>
   void ReleaseWrappedResource(realtype obj, bool clearID = false)
   {
-    // Reject values outside exact pool slots before dereferencing. This does not establish
-    // liveness or owning manager. The NULL handle is left to the original path.
-    // See TODO(NTE-FRAMEGEN-STALE-HANDLE) in vk_resources.h: the audited SDK drops are
-    // uninitialized fields, not proof of leaked objects or cross-instance ownership.
+    // [HANDLE-GUARD] This is trusted internal cleanup, also used for claimed/pending/dormant
+    // objects. Public API boundaries validate ownership/liveness before reaching here. Token
+    // decoding rejects retired generations without touching a reused wrapper slot.
     void *wrapped = (void *)GetWrapped(obj);
+    if(obj != VK_NULL_HANDLE && wrapped == NULL)
+      return;
     if(wrapped != NULL && !IsWrappedHandleStrict((WrappedVkRes *)wrapped))
     {
       RDCERR("ReleaseWrappedResource: %p (wrapped %p) is not one of our wrapped objects - skipping",
@@ -444,7 +608,7 @@ public:
           (*it)->pool = NULL;
           VkResourceType restype = IdentifyTypeByPtr((*it)->Resource);
           if(restype == eResDescriptorSet)
-            ReleaseWrappedResource((VkDescriptorSet)(uint64_t)(*it)->Resource, true);
+            ReleaseWrappedResource(ToWrappedHandle<VkDescriptorSet>((*it)->Resource), true);
           else if(restype == eResCommandBuffer)
             ReleaseWrappedResource((VkCommandBuffer)(*it)->Resource, true);
           else if(restype == eResQueue)
@@ -485,7 +649,14 @@ public:
         res->record = NULL;
       }
     }
-    delete GetWrapped(obj);
+    auto *released = GetWrapped(obj);
+    if(GuardActive())
+    {
+      if(ToTypedHandle(obj).type == eResDevice || ToTypedHandle(obj).type == eResInstance)
+        VulkanHandleGuard::Get().RetireOwner(VulkanHandleGuard::Get().Identity(uint64_t(obj)));
+      VulkanHandleGuard::Get().Retire(released);
+    }
+    delete released;
   }
 
   // helper for sparse mappings

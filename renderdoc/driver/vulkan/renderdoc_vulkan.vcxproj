@@ -148,6 +148,8 @@
     <ClCompile Include="vk_android.cpp">
       <ExcludedFromBuild>true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="vk_handle_guard.cpp" />
+    <ClCompile Include="vk_handle_guard_tests.cpp" />
     <ClCompile Include="vk_resources.cpp" />
     <ClCompile Include="vk_acceleration_structure.cpp" />
     <ClCompile Include="wrappers\vk_cmd_funcs.cpp" />
@@ -191,6 +193,7 @@
     <ClInclude Include="vk_manager.h" />
     <ClInclude Include="vk_rendertext.h" />
     <ClInclude Include="vk_replay.h" />
+    <ClInclude Include="vk_handle_guard.h" />
     <ClInclude Include="vk_resources.h" />
     <ClInclude Include="vk_shader_cache.h" />
     <ClInclude Include="vk_state.h" />

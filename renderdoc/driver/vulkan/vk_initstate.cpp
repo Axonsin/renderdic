@@ -1187,7 +1187,7 @@ bool WrappedVulkan::Serialise_InitialState(SerialiserType &ser, ResourceId id, V
     {
       WrappedVkRes *res = GetResourceManager()->GetResource(id);
 
-      VkDescriptorSet set = (VkDescriptorSet)(uint64_t)res;
+      VkDescriptorSet set = ToWrappedHandle<VkDescriptorSet>(res);
 
       const DescSetLayout &layout = m_CreationInfo.m_DescSetLayout[m_DescriptorSetState[id].layout];
 
