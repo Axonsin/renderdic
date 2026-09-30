@@ -147,6 +147,23 @@ static VkResult(VKAPI_PTR *real_vkCreateInstance)(const VkInstanceCreateInfo *,
 static VkResult VKAPI_PTR hooked_vkCreateInstance_inject(
     const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
     VkInstance *pInstance);
+static PFN_vkGetInstanceProcAddr real_vkGetInstanceProcAddr;
+static PFN_vkVoidFunction VKAPI_PTR hooked_vkGetInstanceProcAddr_inject(VkInstance instance,
+                                                                     const char *name)
+{
+  // Android's vkCreateInstance can be a two-instruction tail-call stub, too short for an inline patch.
+  // Unity obtains it through vkGetInstanceProcAddr, so dlsym/PLT interception of the create name
+  // alone misses it. Cover global lookups with the same injection wrapper, while retaining the
+  // application's layer chain for every instance dispatch.
+  if(instance == VK_NULL_HANDLE && name)
+  {
+    if(!strcmp(name, "vkCreateInstance"))
+      return (PFN_vkVoidFunction)&hooked_vkCreateInstance_inject;
+    if(!strcmp(name, "vkGetInstanceProcAddr"))
+      return (PFN_vkVoidFunction)&hooked_vkGetInstanceProcAddr_inject;
+  }
+  return real_vkGetInstanceProcAddr(instance, name);
+}
 #endif
 
 class VulkanHook : LibraryHook
@@ -166,6 +183,10 @@ class VulkanHook : LibraryHook
         "libvulkan.so",
         FunctionHook("vkCreateInstance", (void **)&real_vkCreateInstance,
                      (void *)&hooked_vkCreateInstance_inject));
+    LibraryHooks::RegisterFunctionHook(
+        "libvulkan.so",
+        FunctionHook("vkGetInstanceProcAddr", (void **)&real_vkGetInstanceProcAddr,
+                     (void *)&hooked_vkGetInstanceProcAddr_inject));
 #endif
 
     // we don't register any library or function hooks because we use the layer system

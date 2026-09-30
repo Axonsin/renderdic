@@ -1,13 +1,28 @@
 # Android Vulkan 句柄销毁防护
 
-模块 v0.5.0 当前投送的是守卫＋属性触发版本：`D:/Projects/rdc_parasite/tools/libVkLayer_GLES_RenderDoc_patched.so`，
-SHA-256 `d6e780d59fdf4ca407a8e1f6e2cd4e03acf922495e1b3ae83612df3e6fdc0ec8`，29,094,528 字节。
-对应 WSL 符号文件 `/home/danny/build-android-arm64/lib/libVkLayer_GLES_RenderDoc.so.dbg` 的 SHA-256
-为 `463c4efd228d73811127ecfc523dea2426f46e006666822e3eb0ac3034fc977e`；二者 Build ID
-均为 `9da069e77e56c17962b89fb38bafeaaf9cd645fb`。源码基线为 `005177fb08d14e3d38d720e64fcb43add8929f33`。
-该构建的运行日志仍携带 CMake 中缓存的提交标签 `61ebb9577097247ae1ff249482906970300a9750`；
-投送与回放对应版本以以上实际 SHA-256 / Build ID 为准。
-本轮对层源码只补 TODO 注释，保持严格句柄守卫与帧生成禁用行为。
+模块 v0.5.0 当前投送的是守卫＋属性触发＋全局 Vulkan 入口查询修复版本：
+`D:/Projects/rdc_parasite/tools/libVkLayer_GLES_RenderDoc_patched.so`，29,098,624 字节，
+SHA-256 `46d9d76c5c5ececb09590d9a98ad6b3c5a1f1c364fae4f2be6001fa9dcbe1fce`。
+对应 WSL 符号文件 `/home/danny/build-android-arm64/lib/libVkLayer_GLES_RenderDoc.so.dbg`，387,878,592 字节，
+SHA-256 `f318f01ecfb94009269a056a20a3ad816566cc9b22896eaf969d8499bb213683`；二者 Build ID
+均为 `7f4f95c64e39398c63bb1a1aa46d54a377f291f1`。在 `c85a3f5555b59d5163509cb41a411cf64eba73fc`
+基础上补充 `vkGetInstanceProcAddr(NULL, ...)` 注入；非空 instance 查询保持原分派链。
+终末地 Unity 先获取 loader 的查询函数，再间接取得 vkCreateInstance；只拦截 create 名称的
+PLT / dlsym 回退不能覆盖它，系统短入口也无法安装现有 inline hook。该修复使实际渲染实例进入层。
+严格句柄守卫与帧生成禁用行为保持不变。
+
+此前 P0–P4 投送 SO 的 SHA-256 为 `d6e780d59fdf4ca407a8e1f6e2cd4e03acf922495e1b3ae83612df3e6fdc0ec8`，
+Build ID 为 `9da069e77e56c17962b89fb38bafeaaf9cd645fb`；原 SO 保留在
+`D:/Projects/rdc_parasite/local/endfield/layer-before.so`，原符号备份改为
+`/home/danny/build-android-arm64/lib/libVkLayer_GLES_RenderDoc.pre-endfield.so.dbg`。
+其符号 SHA-256 仍为 `463c4efd228d73811127ecfc523dea2426f46e006666822e3eb0ac3034fc977e`。
+构建运行日志仍携带 CMake 缓存标签 `61ebb9577097247ae1ff249482906970300a9750`；
+实际版本以本段 SHA-256 / Build ID 和交付 BUILD_INFO.json 的源码提交为准。
+
+追加实机验收：终末地 overlay 恢复，截帧 149,384,685 字节，57 个绘制，执行事件 68 / 238 / 359，
+读回 9,231,360 字节颜色纹理并输出 PNG；异环回归截帧 111,448,561 字节，147 个绘制，
+执行事件 105 / 850 / 1343，读回 7,430,400 字节并输出 PNG。两份 RDC 的 PC 备份与设备 SHA-256 一致。
+匹配 helper 重新链接后字节和 Build ID 未变。详见 `rdc_parasite/docs/TARGET_ENDFIELD_2026-09-30.md`。
 
 2026-09-30 使用同版本 ARM64 `rdoc-capture` 在 HA29QMVJ / Adreno 830 完成历史和新 RDC 的实际回放：
 `OpenFile → OpenCapture → 枚举绘制 → 首/中/末 SetFrameEvent → 读取颜色纹理 → SaveTexture PNG`。
