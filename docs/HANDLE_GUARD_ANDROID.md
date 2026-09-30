@@ -1,5 +1,19 @@
 # Android Vulkan 句柄销毁防护
 
+模块 v0.5.0 当前投送的是守卫＋属性触发版本：`D:/Projects/rdc_parasite/tools/libVkLayer_GLES_RenderDoc_patched.so`，
+SHA-256 `d6e780d59fdf4ca407a8e1f6e2cd4e03acf922495e1b3ae83612df3e6fdc0ec8`，29,094,528 字节。
+对应 WSL 符号文件 `/home/danny/build-android-arm64/lib/libVkLayer_GLES_RenderDoc.so.dbg` 的 SHA-256
+为 `463c4efd228d73811127ecfc523dea2426f46e006666822e3eb0ac3034fc977e`；二者 Build ID
+均为 `9da069e77e56c17962b89fb38bafeaaf9cd645fb`。源码基线为 `005177fb08d14e3d38d720e64fcb43add8929f33`。
+该构建的运行日志仍携带 CMake 中缓存的提交标签 `61ebb9577097247ae1ff249482906970300a9750`；
+投送与回放对应版本以以上实际 SHA-256 / Build ID 为准。
+本轮对层源码只补 TODO 注释，保持严格句柄守卫与帧生成禁用行为。
+
+2026-09-30 使用同版本 ARM64 `rdoc-capture` 在 HA29QMVJ / Adreno 830 完成历史和新 RDC 的实际回放：
+`OpenFile → OpenCapture → 枚举绘制 → 首/中/末 SetFrameEvent → 读取颜色纹理 → SaveTexture PNG`。
+历史文件执行事件 750/2593/4647（765 个绘制）；新文件执行 108/859/1353（148 个绘制），
+两次均读回 7,430,400 字节纹理并输出 PNG。详见 `rdc_parasite/docs/VALIDATION_0.5.0.md`。
+
 本次修改只作用于 Android 捕获层。游戏设置、游戏二进制、帧生成 SDK、公共
 `WrappingPool` 语义和 RDC 格式均未修改。它防止 SDK 初始化失败后的错误清理进入驱动，
 不会让失败的 SDK 初始化成功，也不增加 optical-flow 或扩展捕获支持。
@@ -80,7 +94,7 @@ adb shell 'LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/rdoc_guard_integratio
 100,000 次复用检查槽位有界。benchmark 另做 1,000,000 次注册/claim/释放并断言槽位为 1。
 integration 覆盖实际层的跨设备、错类型、旧身份、批量、池重置、特殊扩展及捕获结束/丢弃。
 
-## 本次构建和验证记录
+## 历史守卫版构建和验证记录（未加入属性触发）
 
 源码基线 `7e143d71b`，当前工作区修改；Android 使用 NDK r16b，arm64-v8a。
 Linux 非 Android Vulkan `renderdoc` 完整构建通过；Windows 工程清单已更新，未执行 Windows 编译。

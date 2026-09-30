@@ -941,7 +941,7 @@ void NTECreateCaller(VkDevice device, T obj, void *caller)
 #endif
 
 // ---------------------------------------------------------------------------------------------
-// [HANDLE-GUARD] NTE-FRAMEGEN-STALE-HANDLE: the SDK's failed initialization cleans up 19
+// TODO(NTE-FRAMEGEN-STALE-HANDLE): the SDK's failed initialization cleans up 19
 // uninitialized handle fields (audit: rdc_parasite/docs/NTE_HANDLE_AUDIT_2026-09-30.md).
 // A pointer-shaped value is not evidence of a valid driver object. Android capture now uses
 // vk_handle_guard identities and rejects unknown values by default. The explicit compatibility

@@ -657,6 +657,9 @@ VK_LAYER_RENDERDIC_CaptureGetDeviceProcAddr(VkDevice device, const char *pName)
     HookInitVulkanInstanceExts();
   }
 
+  // TODO(NTE-FRAMEGEN-OPTICAL-FLOW): VK_NV_optical_flow needs wrappers, typed handle
+  // conversion and capture/replay serialisation before enabling frame generation. Keep
+  // unknown entrypoints disabled; see rdc_parasite/docs/NTE_HANDLE_AUDIT_2026-09-30.md.
   // unknown or not-enabled functions must return NULL
   return NULL;
 }
@@ -746,6 +749,9 @@ VK_LAYER_RENDERDIC_CaptureGetInstanceProcAddr(VkInstance instance, const char *p
 
   HookInitVulkanInstanceExts_PhysDev();
 
+  // TODO(NTE-FRAMEGEN-OPTICAL-FLOW): implement optical-flow wrappers and handle conversion
+  // together with capture/replay support before exposing these extensions through GIPA.
+  // Audit: rdc_parasite/docs/NTE_HANDLE_AUDIT_2026-09-30.md; frame generation stays disabled.
   // all other functions must return NULL so that GIPA can be used with NULL checks sensibly for
   // missing functionality
 
