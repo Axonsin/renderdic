@@ -407,6 +407,13 @@ void WrappedVulkan::vkGetPhysicalDeviceMemoryProperties(
     VkPhysicalDevice physicalDevice, VkPhysicalDeviceMemoryProperties *pMemoryProperties)
 {
   ObjDisp(physicalDevice)->GetPhysicalDeviceMemoryProperties(Unwrap(physicalDevice), pMemoryProperties);
+  // Captured images have TRANSIENT_ATTACHMENT removed so that their contents can
+  // be copied. Advertising lazy memory makes engines choose a transient-only
+  // allocation path, even though the patched image no longer accepts that type.
+  // Preserve indices and heaps; only stop advertising the incompatible capability.
+  if(IsCaptureMode(m_State))
+    for(uint32_t i = 0; i < pMemoryProperties->memoryTypeCount; ++i)
+      pMemoryProperties->memoryTypes[i].propertyFlags &= ~VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
 }
 
 void WrappedVulkan::vkGetImageSubresourceLayout(VkDevice device, VkImage image,
@@ -1008,8 +1015,11 @@ void WrappedVulkan::vkGetPhysicalDeviceQueueFamilyProperties2(
 void WrappedVulkan::vkGetPhysicalDeviceMemoryProperties2(
     VkPhysicalDevice physicalDevice, VkPhysicalDeviceMemoryProperties2 *pMemoryProperties)
 {
-  return ObjDisp(physicalDevice)
-      ->GetPhysicalDeviceMemoryProperties2(Unwrap(physicalDevice), pMemoryProperties);
+  ObjDisp(physicalDevice)->GetPhysicalDeviceMemoryProperties2(Unwrap(physicalDevice), pMemoryProperties);
+  if(IsCaptureMode(m_State))
+    for(uint32_t i = 0; i < pMemoryProperties->memoryProperties.memoryTypeCount; ++i)
+      pMemoryProperties->memoryProperties.memoryTypes[i].propertyFlags &=
+          ~VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
 }
 
 void WrappedVulkan::vkGetPhysicalDeviceSparseImageFormatProperties2(

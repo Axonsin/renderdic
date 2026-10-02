@@ -213,6 +213,17 @@ HookingInfo &GetHookInfo()
   return hookinfo;
 }
 
+static bool onlyVulkanLoaderHooks = false;
+
+typedef void *(*pfn__loader_dlopen)(const char *filename, int flags, const void *caller_addr);
+
+typedef void *(*pfnandroid_dlopen_ext)(const char *__filename, int __flags,
+                                     const android_dlextinfo *__info);
+
+pfnandroid_dlopen_ext real_android_dlopen_ext = NULL;
+
+pfn__loader_dlopen loader_dlopen = NULL;
+
 void *intercept_dlopen(const char *filename, int flag)
 {
   if(filename)
@@ -229,6 +240,9 @@ void *intercept_dlopen(const char *filename, int flag)
        (!strstr(filename, "/vendor/") && GetHookInfo().IsLibHook(rdcstr(filename))))
     {
       HOOK_DEBUG_PRINT("Intercepting dlopen for %s", filename);
+      // Resolve our own copy in its existing namespace without re-entering a loader hook.
+      if(loader_dlopen)
+        return loader_dlopen(RENDERDOC_ANDROID_LIBRARY, flag, __builtin_return_address(0));
       return dlopen(RENDERDOC_ANDROID_LIBRARY, flag);
     }
   }
@@ -245,6 +259,9 @@ static int dl_iterate_callback(struct dl_phdr_info *info, size_t size, void *dat
     return 0;
   }
   rdcstr soname = info->dlpi_name;
+
+  if(onlyVulkanLoaderHooks && soname != "libvulkan.so" && !soname.endsWith("/libvulkan.so"))
+    return 0;
 
   if(GetHookInfo().IsHooked(soname))
     return 0;
@@ -432,15 +449,8 @@ static int dl_iterate_callback(struct dl_phdr_info *info, size_t size, void *dat
   return 0;
 }
 
-// android has a special dlopen that passes the caller address in.
-typedef void *(*pfn__loader_dlopen)(const char *filename, int flags, const void *caller_addr);
-
-typedef void *(*pfnandroid_dlopen_ext)(const char *__filename, int __flags,
-                                       const android_dlextinfo *__info);
-
-pfnandroid_dlopen_ext real_android_dlopen_ext = NULL;
-
-pfn__loader_dlopen loader_dlopen = NULL;
+// android has a special dlopen that passes the caller address in; pfn__loader_dlopen and the
+// loader_dlopen / real_android_dlopen_ext globals are declared above intercept_dlopen.
 uint64_t suppressTLS = 0;
 
 // the swap-family hooks stashed at the end of PatchHookedFunctions, for HookLoadedVendorSwap
@@ -594,8 +604,86 @@ extern "C" __attribute__((visibility("default"))) void *hooked_dlsym(void *handl
   return repl.hook;
 }
 
+// dlsym can't reach __loader_dlopen: RTLD_NEXT from our locally-loaded copy doesn't search past
+// it, the linker namespace blocks dlopen()ing the linker's own objects, and bionic's
+// dl_iterate_phdr doesn't list them either. But every library that wraps dlopen (libdl.so on old
+// Android, libdl_android.so on new) already holds the resolved address in its GOT: walk each
+// mapped library's JUMP_SLOT relocations for "__loader_dlopen" and read that pointer.
+struct LdAndroidLookup
+{
+  const char *symbol;
+  void *result;
+};
+
+static int ld_android_lookup_callback(struct dl_phdr_info *info, size_t, void *user)
+{
+  LdAndroidLookup *data = (LdAndroidLookup *)user;
+
+  if(data->result || info->dlpi_name == NULL ||
+     (!rdcstr(info->dlpi_name).endsWith("/libdl.so") &&
+      !rdcstr(info->dlpi_name).endsWith("/libdl_android.so")))
+    return 0;
+
+  const ElfW(Phdr) *dyn_phdr = NULL;
+  for(int ph = 0; ph < info->dlpi_phnum; ph++)
+  {
+    if(info->dlpi_phdr[ph].p_type == PT_DYNAMIC)
+      dyn_phdr = &info->dlpi_phdr[ph];
+  }
+
+  if(!dyn_phdr)
+    return 0;
+
+  const ElfW(Dyn) *dyn = (const ElfW(Dyn) *)(info->dlpi_addr + dyn_phdr->p_vaddr);
+
+  const ElfW(Sym) *symtab = NULL;
+  const char *strtab = NULL;
+  const Elf_Rel *jmprel = NULL;
+  size_t pltsz = 0;
+
+  for(; dyn->d_tag != DT_NULL; dyn++)
+  {
+    switch(dyn->d_tag)
+    {
+      case DT_SYMTAB: symtab = (const ElfW(Sym) *)(info->dlpi_addr + dyn->d_un.d_ptr); break;
+      case DT_STRTAB: strtab = (const char *)(info->dlpi_addr + dyn->d_un.d_ptr); break;
+      case DT_JMPREL: jmprel = (const Elf_Rel *)(info->dlpi_addr + dyn->d_un.d_ptr); break;
+      case DT_PLTRELSZ: pltsz = (size_t)dyn->d_un.d_val; break;
+      default: break;
+    }
+  }
+
+  if(!symtab || !strtab || !jmprel)
+    return 0;
+
+  for(size_t i = 0; i < pltsz / sizeof(Elf_Rel); i++)
+  {
+    const Elf_Rel *rel = jmprel + i;
+
+    if(ELF_R_TYPE(rel->r_info) != R_JUMP_SLOT)
+      continue;
+
+    const char *name = strtab + symtab[ELF_R_SYM(rel->r_info)].st_name;
+
+    if(strcmp(name, data->symbol) != 0)
+      continue;
+
+    // the linker binds JUMP_SLOTs eagerly at load, so the GOT already holds the real pointer
+    data->result = *(void **)(info->dlpi_addr + rel->r_offset);
+    RDCLOG("__loader_dlopen via %s GOT %p = %p", info->dlpi_name,
+           (void *)(info->dlpi_addr + rel->r_offset), data->result);
+    return 1;
+  }
+
+  return 0;
+}
+
 static void InstallHooksCommon()
 {
+  // If every API entry was intercepted inline, only the Vulkan loader needs the
+  // android_dlopen_ext hook that prevents loading a second copy of this layer.
+  // Avoid rewriting application and SDK imports that serve no capture purpose.
+  onlyVulkanLoaderHooks = GetHookInfo().GetLibHooks().empty();
   suppressTLS = Threading::AllocateTLSSlot();
 
   // blacklist hooking certain system libraries or ourselves
@@ -607,19 +695,25 @@ static void InstallHooksCommon()
 
   loader_dlopen = (pfn__loader_dlopen)dlsym(RTLD_NEXT, "__loader_dlopen");
 
-  if(loader_dlopen)
+  if(!loader_dlopen)
   {
-    LibraryHooks::RegisterFunctionHook("", FunctionHook("dlopen", NULL, (void *)&hooked_dlopen));
+    // RTLD_NEXT from our locally-loaded copy doesn't reach ld-android, and the linker namespace
+    // blocks dlopen()ing it directly - read the resolved pointer out of libdl's GOT instead.
+    // Used only by intercept_dlopen to reload our own library without re-entering any hook.
+    LdAndroidLookup data = {"__loader_dlopen", NULL};
+    dl_iterate_phdr(ld_android_lookup_callback, &data);
+    loader_dlopen = (pfn__loader_dlopen)data.result;
   }
-  else
+
+  if(!loader_dlopen)
   {
     RDCWARN("Couldn't find __loader_dlopen, falling back to slow path for dlopen hooking");
   }
 
-  // without interceptor-lib there are no inline hooks, so any function pointer that the
-  // application resolves with dlsym() would bypass our PLT/GOT rewrites. Intercept dlsym itself
-  // so that runtime-resolved pointers for hooked symbols get our wrappers.
-  LibraryHooks::RegisterFunctionHook("", FunctionHook("dlsym", NULL, (void *)&hooked_dlsym));
+  // Failed inline hooks (and non-interceptor builds) still need dlsym interception
+  // so that runtime-resolved pointers receive the wrappers in the fallback list.
+  if(!onlyVulkanLoaderHooks)
+    LibraryHooks::RegisterFunctionHook("", FunctionHook("dlsym", NULL, (void *)&hooked_dlsym));
 
   LibraryHooks::RegisterFunctionHook(
       "", FunctionHook("android_dlopen_ext", NULL, (void *)&hooked_android_dlopen_ext));
@@ -633,6 +727,7 @@ void intercept_error(void *, const char *error_msg)
 }
 
 #include "interceptor-lib/include/interceptor.h"
+#include "aarch64_thunk_hook.h"
 
 // NTE-class applications bind their swap entry point straight to the vendor driver
 // (libEGL_adreno.so, loaded into the sphal namespace - not reachable with dlopen() from our
@@ -806,8 +901,34 @@ void Android_HookVendorSwap()
   HookLoadedVendorSwap();
 }
 
+// The module installs this small, read-only profile beside the layer. Reading it
+// here makes policy per application and independent of hidden system properties.
+static bool UseLegacyVulkanHooks()
+{
+  Dl_info info = {};
+  if(!dladdr((void *)&UseLegacyVulkanHooks, &info) || !info.dli_fname)
+    return false;
+  rdcstr path = info.dli_fname;
+  int slash = path.find_last_of("/");
+  if(slash < 0)
+    return false;
+  path = path.substr(0, slash + 1) + "parasite-compat.conf";
+  FILE *file = fopen(path.c_str(), "r");
+  if(!file)
+    return false;
+  char line[128];
+  bool legacy = false;
+  while(fgets(line, sizeof(line), file))
+    if(!strcmp(line, "hook_policy=legacy\n") || !strcmp(line, "hook_policy=legacy"))
+      legacy = true;
+  fclose(file);
+  return legacy;
+}
+
 void PatchHookedFunctions()
 {
+  const bool legacyVulkan = UseLegacyVulkanHooks();
+  unsigned shortHooks = 0, inlineHooks = 0, fallbackVulkan = 0;
   RDCLOG("Applying hooks with interceptor-lib");
 
 // see below - Huawei workaround
@@ -901,7 +1022,16 @@ void PatchHookedFunctions()
 
       void *trampoline = NULL;
 
-      bool success = InterceptFunction(intercept, oldfunc, hook.hook, &trampoline, &intercept_error);
+      // Android 15 may export only BTI c + a tail branch. Interceptor's absolute
+      // jump needs more space than that. Also cover pointers cached to the branch
+      // destination by recognising its PAC/frame prologue, without generic relocation.
+      bool shortThunk = !legacyVulkan && vulkan && hook.orig &&
+                        AndroidThunkHook::Install(oldfunc, hook.hook, hook.orig, true);
+      bool success = shortThunk ||
+                     InterceptFunction(intercept, oldfunc, hook.hook, &trampoline, &intercept_error);
+      if(shortThunk)
+        RDCLOG("Hooked Vulkan short thunk %s at %p, callback %p", hook.function.c_str(), oldfunc,
+               *hook.orig);
 
       if(!hook.orig)
         RDCWARN("No original pointer for hook of '%s' - trampoline will be lost!",
@@ -910,6 +1040,12 @@ void PatchHookedFunctions()
       if(hook.orig && *hook.orig == NULL)
         *hook.orig = trampoline;
 
+      if(vulkan)
+      {
+        if(shortThunk) shortHooks++;
+        else if(success) inlineHooks++;
+        else fallbackVulkan++;
+      }
       if(success)
       {
         HOOK_DEBUG_PRINT("Hooked successfully, trampoline is %p", trampoline);
@@ -924,6 +1060,11 @@ void PatchHookedFunctions()
       GetHookInfo().SetHooked(oldfunc);
     }
   }
+
+  RDCLOG("PARASITE_COMPAT policy=%s vulkan=%s short=%u inline=%u fallback=%u",
+         legacyVulkan ? "legacy" : "auto",
+         fallbackVulkan ? "fallback" : (shortHooks ? "short" : (inlineHooks ? "inline" : "unknown")),
+         shortHooks, inlineHooks, fallbackVulkan);
 
   // we still need to hook android_dlopen_ext with interceptor-lib so that we can intercept the
   // vulkan loader's attempts to load our library and prevent it from loading a second copy (!!)

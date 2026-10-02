@@ -72,6 +72,20 @@ void library_loaded()
 
     RDCLOG("Loading into %s", curfile.c_str());
 
+#if defined(__ANDROID__)
+    // Sandboxed WebView subprocesses do not need application library interception.
+    // Avoid changing their library bindings under the renderer's sandbox policy;
+    // Vulkan layer entry points remain available if explicitly requested.
+    if(curfile.contains("sandboxed_process"))
+    {
+      RDCLOG("Sandboxed renderer process detected - not installing library hooks");
+      return;
+    }
+#endif
+
+    // Keep registration synchronous and preserve the existing 15 ms target-control
+    // connection window. Deferring registration changed startup behaviour in Android
+    // compatibility testing; the precise application-side cause is not established.
     LibraryHooks::RegisterHooks();
 
     // we have a short sleep here to allow target control to connect, since unlike windows we can't
