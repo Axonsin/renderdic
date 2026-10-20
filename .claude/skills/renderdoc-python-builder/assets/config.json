@@ -1,0 +1,57 @@
+{
+  "skill_name": "renderdoc-python-builder",
+  "version": "1.3.0",
+  "description": "Build RenderDoc Python extension modules for Windows",
+
+  "default_build": {
+    "python_version": "auto",
+    "config": "Development",
+    "platform": "x64"
+  },
+
+  "tools": {
+    "vswhere_path": "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe",
+    "windows_kits_root": "C:/Program Files (x86)/Windows Kits/10",
+    "platform_toolset": "auto"
+  },
+
+  "project": {
+    "root_marker": "renderdoc/api/replay/version.h",
+    "vcxproj_paths": {
+      "pyrenderdoc": "qrenderdoc/Code/pyrenderdoc/pyrenderdoc_module.vcxproj",
+      "qrenderdoc": "qrenderdoc/Code/pyrenderdoc/qrenderdoc_module.vcxproj"
+    },
+    "version_header": "renderdoc/api/replay/version.h",
+    "stubs_script": "docs/regenerate_stubs.py",
+    "breakpad_projects": [
+      "renderdoc/3rdparty/breakpad/client/windows/common.vcxproj",
+      "renderdoc/3rdparty/breakpad/client/windows/crash_generation/crash_generation_client.vcxproj",
+      "renderdoc/3rdparty/breakpad/client/windows/handler/exception_handler.vcxproj"
+    ]
+  },
+
+  "dependencies": {
+    "required_dlls": ["renderdoc.dll", "d3dcompiler_47.dll"],
+    "file_descriptions": {
+      "renderdoc.pyd": "Core RenderDoc Python module",
+      "qrenderdoc.pyd": "Qt-based UI Python module",
+      "renderdoc.dll": "RenderDoc core library (required dependency)",
+      "d3dcompiler_47.dll": "Direct3D compiler (required dependency)"
+    }
+  },
+
+  "auto_fixes": {
+    "python_313_compat": {
+      "enabled": true,
+      "flag": "/wd4996",
+      "xml_namespace": "http://schemas.microsoft.com/developer/msbuild/2003"
+    }
+  },
+
+  "supported_python_versions": [
+    "3.6", "3.7", "3.8", "3.9", "3.10", "3.11", "3.12", "3.13"
+  ],
+
+  "supported_configs": ["Development", "Release"],
+  "supported_platforms": ["x64", "x86"]
+}

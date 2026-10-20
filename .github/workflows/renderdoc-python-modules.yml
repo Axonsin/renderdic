@@ -1,0 +1,127 @@
+name: RenderDoc Python Modules
+
+"on":
+  schedule:
+    - cron: "0 2 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: renderdoc-python-modules
+  cancel-in-progress: false
+
+env:
+  BUILD_CONFIG: Release
+  BUILD_PLATFORM: x64
+  MIN_RENDERDOC_MINOR: "42"
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+  PYTHON_MINOR: "3.13"
+  RENDERDOC_REPO_URL: https://github.com/baldurk/renderdoc.git
+
+jobs:
+  discover:
+    name: Discover missing RenderDoc releases
+    runs-on: ubuntu-22.04
+    outputs:
+      count: ${{ steps.discover.outputs.count }}
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - name: Checkout packaging repository
+        uses: actions/checkout@v4
+
+      - name: Discover missing release assets
+        id: discover
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python .github/scripts/discover_renderdoc_releases.py \
+            --renderdoc-repo "$RENDERDOC_REPO_URL" \
+            --owner-repo "$GITHUB_REPOSITORY" \
+            --min-minor "$MIN_RENDERDOC_MINOR" \
+            --python-minor "$PYTHON_MINOR" \
+            --platform "$BUILD_PLATFORM"
+
+  build:
+    name: Build ${{ matrix.renderdoc_tag }} Python modules
+    needs: discover
+    if: ${{ needs.discover.outputs.count != '0' }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Checkout packaging repository
+        uses: actions/checkout@v4
+        with:
+          path: packaging
+
+      - name: Checkout RenderDoc source
+        uses: actions/checkout@v4
+        with:
+          repository: baldurk/renderdoc
+          ref: ${{ matrix.renderdoc_tag }}
+          path: renderdoc-src
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_MINOR }}
+
+      - name: Download qrenderdoc third-party extras
+        shell: pwsh
+        working-directory: renderdoc-src
+        run: |
+          curl.exe -L https://renderdoc.org/qrenderdoc_3rdparty.zip -o qrenderdoc_3rdparty.zip
+          7z x qrenderdoc_3rdparty.zip
+
+      - name: Build Python modules
+        shell: pwsh
+        run: |
+          python packaging\.claude\skills\renderdoc-python-builder\scripts\skill.py `
+            --project-root "$env:GITHUB_WORKSPACE\renderdoc-src" `
+            --python-version "$env:PYTHON_MINOR" `
+            --config "$env:BUILD_CONFIG" `
+            --platform "$env:BUILD_PLATFORM" `
+            --strict-stubs
+
+      - name: Verify modules and stubs
+        id: verify
+        shell: pwsh
+        run: |
+          python packaging\.github\scripts\verify_renderdoc_release.py `
+            --release-root "$env:GITHUB_WORKSPACE\renderdoc-src\python-releases" `
+            --renderdoc-tag "${{ matrix.renderdoc_tag }}" `
+            --python-minor "$env:PYTHON_MINOR" `
+            --platform "$env:BUILD_PLATFORM"
+
+      - name: Package release directory
+        id: package
+        shell: pwsh
+        run: |
+          $releaseDir = "${{ steps.verify.outputs.release_dir }}"
+          $assetPath = Join-Path $env:RUNNER_TEMP "${{ matrix.asset_name }}"
+          if (Test-Path $assetPath) {
+            Remove-Item -LiteralPath $assetPath -Force
+          }
+          Compress-Archive -Path (Join-Path $releaseDir "*") -DestinationPath $assetPath -CompressionLevel Optimal
+          "asset_path=$assetPath" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub Release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ matrix.release_tag }}" --repo "$env:GITHUB_REPOSITORY" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            $notes = "Built from baldurk/renderdoc ${{ matrix.renderdoc_tag }}`nPython: $env:PYTHON_MINOR`nPlatform: $env:BUILD_PLATFORM`nVerified version: ${{ steps.verify.outputs.version_string }}"
+            gh release create "${{ matrix.release_tag }}" `
+              --title "RenderDoc Python Modules ${{ matrix.renderdoc_tag }}" `
+              --notes $notes `
+              --target "${{ github.sha }}" `
+              --repo "$env:GITHUB_REPOSITORY"
+          }
+          gh release upload "${{ matrix.release_tag }}" "${{ steps.package.outputs.asset_path }}" --clobber --repo "$env:GITHUB_REPOSITORY"
