@@ -49,6 +49,95 @@
   } while(0)
 #endif
 
+// The layer is not always loaded under its compile-time SONAME: Parasite deploys it as
+// libVkLayer_Parasite.so, or under the khronos/random disguise aliases. Name-based self-checks
+// therefore miss our own module, so identify it by address: our code lies inside one of the
+// image's PT_LOAD ranges. Comparing load bases instead would fail for an image whose lowest
+// PT_LOAD has a non-zero vaddr, and could match an unrelated module that shares a bias.
+static bool IsSelfImage(const struct dl_phdr_info *info)
+{
+  const uintptr_t self = (uintptr_t)&IsSelfImage;
+
+  for(int ph = 0; ph < info->dlpi_phnum; ph++)
+  {
+    const ElfW(Phdr) *hdr = &info->dlpi_phdr[ph];
+    if(hdr->p_type != PT_LOAD)
+      continue;
+
+    const uintptr_t start = (uintptr_t)info->dlpi_addr + hdr->p_vaddr;
+    if(self >= start && self < start + hdr->p_memsz)
+      return true;
+  }
+
+  return false;
+}
+
+// The path we were actually mapped from, which is what dlopen() must be given to resolve the
+// existing copy instead of loading a second one. FileIO::GetLibraryFilename() scans
+// /proc/self/maps for the build SONAME, which a renamed deployment never matches, so resolve
+// through dladdr first and only fall back to it.
+static const char *SelfLibraryFilename()
+{
+  static char path[4096] = {};
+  static bool resolved = false;
+
+  if(!resolved)
+  {
+    Dl_info info = {};
+    if(dladdr((const void *)&IsSelfImage, &info) != 0 && info.dli_fname != NULL &&
+       info.dli_fname[0] != '\0')
+    {
+      strncpy(path, info.dli_fname, sizeof(path) - 1);
+    }
+    else
+    {
+      rdcstr selfLib;
+      FileIO::GetLibraryFilename(selfLib);
+      if(selfLib.empty())
+        strncpy(path, RENDERDOC_ANDROID_LIBRARY, sizeof(path) - 1);
+      else
+        strncpy(path, selfLib.c_str(), sizeof(path) - 1);
+    }
+    resolved = true;
+  }
+
+  return path;
+}
+
+static bool IsSelfLibrary(const char *filename)
+{
+  if(filename == NULL)
+    return false;
+
+  const char *self = SelfLibraryFilename();
+  if(strstr(filename, self) != NULL)
+    return true;
+
+  // A dlopen by bare soname, or by one of the disguise aliases, never carries our full path:
+  // compare basenames so such a request cannot load a second copy of the layer.
+  const char *name = strrchr(filename, '/');
+  name = name ? name + 1 : filename;
+  const char *selfName = strrchr(self, '/');
+  selfName = selfName ? selfName + 1 : self;
+
+  return strcmp(name, selfName) == 0 || strcmp(name, RENDERDOC_ANDROID_LIBRARY) == 0;
+}
+
+// dlsym() calls made from inside our own hooks must reach the real implementation. If our GOT
+// slot still ends up pointing at hooked_dlsym, calling through the PLT re-enters forever, and a
+// suppression scope does not help because its own branch calls dlsym() again. Capture the
+// resolved pointer before any GOT rewrite can land and call that directly.
+static void *(*real_dlsym_fn)(void *, const char *) = NULL;
+
+static void *self_dlsym(void *handle, const char *symbol)
+{
+  if(real_dlsym_fn != NULL)
+    return real_dlsym_fn(handle, symbol);
+
+  ScopedSuppressHooking suppress;
+  return dlsym(handle, symbol);
+}
+
 // from plthook_elf.c
 #if defined __x86_64__ || defined __x86_64
 #define R_JUMP_SLOT R_X86_64_JUMP_SLOT
@@ -149,8 +238,19 @@ public:
 
   bool IsLibHook(void *handle)
   {
-    SCOPED_LOCK(lock);
-    for(const rdcstr &lib : libhooks)
+    if(handle == NULL)
+      return false;
+
+    // Copy under the lock, then call the loader with the lock released. dlopen() takes the
+    // linker mutex, and the module sweep runs with that mutex held while taking this same lock,
+    // so holding it across dlopen() can deadlock the two threads against each other.
+    rdcarray<rdcstr> libs;
+    {
+      SCOPED_LOCK(lock);
+      libs = libhooks;
+    }
+
+    for(const rdcstr &lib : libs)
     {
       void *libHandle = dlopen(lib.c_str(), RTLD_NOLOAD);
       HOOK_DEBUG_PRINT("%s is %p", lib.c_str(), libHandle);
@@ -236,14 +336,16 @@ void *intercept_dlopen(const char *filename, int flag)
     // Vendor driver paths are exempted: the system libEGL dlopen()s the vendor driver by full
     // path, and vendor sonames can be in our library hook list - redirecting that would break
     // driver initialisation completely.
-    if(strstr(filename, RENDERDOC_ANDROID_LIBRARY) ||
+    if(IsSelfLibrary(filename) ||
        (!strstr(filename, "/vendor/") && GetHookInfo().IsLibHook(rdcstr(filename))))
     {
       HOOK_DEBUG_PRINT("Intercepting dlopen for %s", filename);
-      // Resolve our own copy in its existing namespace without re-entering a loader hook.
+      // Resolve our own copy in its existing namespace without re-entering a loader hook. Use the
+      // path we were actually loaded from: a renamed deployment would otherwise load a second
+      // copy of the layer under a name the loader treats as a different library.
       if(loader_dlopen)
-        return loader_dlopen(RENDERDOC_ANDROID_LIBRARY, flag, __builtin_return_address(0));
-      return dlopen(RENDERDOC_ANDROID_LIBRARY, flag);
+        return loader_dlopen(SelfLibraryFilename(), flag, __builtin_return_address(0));
+      return dlopen(SelfLibraryFilename(), flag);
     }
   }
 
@@ -259,6 +361,12 @@ static int dl_iterate_callback(struct dl_phdr_info *info, size_t size, void *dat
     return 0;
   }
   rdcstr soname = info->dlpi_name;
+
+  // Never rewrite our own GOT. The layer is deployed under a runtime-chosen filename, so the
+  // SONAME blacklist can miss it - rewriting our own dlsym slot sends hooked_dlsym's internal
+  // dlsym() call back into itself until the calling thread's stack overflows.
+  if(IsSelfImage(info))
+    return 0;
 
   if(onlyVulkanLoaderHooks && soname != "libvulkan.so" && !soname.endsWith("/libvulkan.so"))
     return 0;
@@ -542,7 +650,7 @@ extern "C" __attribute__((visibility("default"))) void *hooked_dlsym(void *handl
   // pointers. Resolve for real, and wrap only when the resolution landed in a hooked library.
   if((handle == RTLD_DEFAULT || handle == RTLD_NEXT) && symbol != NULL && !hooks_suppressed())
   {
-    void *ret = dlsym(handle, symbol);
+    void *ret = self_dlsym(handle, symbol);
     if(ret == NULL)
       return NULL;
 
@@ -558,12 +666,12 @@ extern "C" __attribute__((visibility("default"))) void *hooked_dlsym(void *handl
   }
 
   if(handle == NULL || symbol == NULL || hooks_suppressed())
-    return dlsym(handle, symbol);
+    return self_dlsym(handle, symbol);
 
   const FunctionHook repl = GetHookInfo().GetFunctionHook(symbol);
 
   if(repl.hook == NULL)
-    return dlsym(handle, symbol);
+    return self_dlsym(handle, symbol);
 
   if(!GetHookInfo().IsHooked(handle))
   {
@@ -579,7 +687,7 @@ extern "C" __attribute__((visibility("default"))) void *hooked_dlsym(void *handl
     return repl.hook;
   }
 
-  void *ret = dlsym(handle, symbol);
+  void *ret = self_dlsym(handle, symbol);
 
   if(ret == NULL)
     return NULL;
@@ -688,8 +796,15 @@ static void InstallHooksCommon()
 
   // blacklist hooking certain system libraries or ourselves
   GetHookInfo().SetHooked(RENDERDOC_ANDROID_LIBRARY);
+  // ... including the name we were actually deployed as, which may not be the build SONAME
+  GetHookInfo().SetHooked(rdcstr(SelfLibraryFilename()));
   GetHookInfo().SetHooked("libc.so");
   GetHookInfo().SetHooked("libvndksupport.so");
+
+  // Resolve the real dlsym before LibraryHooks::Refresh() can rewrite any GOT slot: from then on
+  // our own call sites may land on hooked_dlsym, and only this pointer still reaches libdl.
+  if(real_dlsym_fn == NULL)
+    real_dlsym_fn = (void *(*)(void *, const char *))dlsym(RTLD_DEFAULT, "dlsym");
 
   real_android_dlopen_ext = &android_dlopen_ext;
 
