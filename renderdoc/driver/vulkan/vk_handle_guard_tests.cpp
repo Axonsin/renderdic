@@ -33,6 +33,13 @@
 #include "common/globalconfig.h"
 #if ENABLED(ENABLE_UNIT_TESTS)
 #include "catch/catch.hpp"
+
+template <>
+rdcstr DoStringise(const VulkanHandleGuard::Reason &reason)
+{
+  return VulkanHandleGuard::ReasonName(reason);
+}
+
 #define GUARD_TEST TEST_CASE("Vulkan handle lifetime guard", "[vulkan][handle-guard]")
 #endif
 #endif
