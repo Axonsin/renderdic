@@ -1,0 +1,7 @@
+node_modules/
+.build/
+dist/
+ui-dist/
+artifacts/
+__pycache__/
+*.pyc

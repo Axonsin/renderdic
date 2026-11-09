@@ -1,0 +1,44 @@
+{
+  "name": "renderdic-ts-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": ".build/desktop/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build:backend": "node scripts/build-backend.mjs",
+    "build:worker": "node scripts/build-worker.mjs",
+    "build:ui": "tsc --noEmit && vite build && node scripts/build-desktop.mjs",
+    "build:prototype": "node scripts/build-prototype.mjs",
+    "test": "tsc --noEmit && vitest run",
+    "test:smoke": "node tests/worker-smoke.mjs",
+    "test:e2e": "node tests/electron-smoke.mjs"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "4.7.0",
+    "@radix-ui/react-dialog": "1.1.15",
+    "@tanstack/react-virtual": "3.13.23",
+    "clsx": "2.1.1",
+    "lucide-react": "0.577.0",
+    "monaco-editor": "0.55.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "zustand": "5.0.12"
+  },
+  "devDependencies": {
+    "@electron/packager": "19.0.3",
+    "@tailwindcss/vite": "4.2.2",
+    "@types/node": "24.12.0",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.1",
+    "electron": "44.7.0",
+    "esbuild": "0.27.4",
+    "playwright": "1.59.1",
+    "prettier": "3.8.1",
+    "tailwindcss": "4.2.2",
+    "typescript": "6.0.2",
+    "vite": "8.0.3",
+    "vitest": "4.1.0"
+  }
+}

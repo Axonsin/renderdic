@@ -1,0 +1,26 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <OutDir>$(FrontendBuildRoot)\bin\</OutDir>
+    <OutDir Condition="'$(MSBuildProjectName)'=='pyrenderdoc_module'">$(FrontendBuildRoot)\bin\pymodules\</OutDir>
+    <IntDir>$(FrontendBuildRoot)\obj\$(MSBuildProjectName)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <MultiProcessorCompilation>false</MultiProcessorCompilation>
+      <AdditionalOptions>/MP4 /FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <!-- The base branch has an Android-only dlopen fallback without a platform guard.
+       Compile a generated guarded copy on Windows; never edit the owning source. -->
+  <ItemGroup Condition="'$(MSBuildProjectName)'=='renderdoc_gl'">
+    <ClCompile Remove="gl_hooks.cpp" />
+    <ClCompile Include="$(FrontendBuildRoot)\generated\gl_hooks.win32.cpp">
+      <AdditionalIncludeDirectories>$(SolutionDir)renderdoc\driver\gl;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemGroup>
+  <!-- This baseline's Catch test needs a missing DoStringise<Reason> specialization.
+       Omit only that embedded test from the frontend runtime, not any driver code. -->
+  <ItemGroup Condition="'$(MSBuildProjectName)'=='renderdoc_vulkan'">
+    <ClCompile Remove="vk_handle_guard_tests.cpp" />
+  </ItemGroup>
+</Project>
